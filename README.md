@@ -38,6 +38,17 @@ go run ./tools/pack -install ../ClawProxyHub/data/plugins
 
 ## 打包与发布
 
+> fork 提示：仓库是 fork 出来的，Actions 的自动触发（push）在首次可能不生效，
+> 表现为推送后 Actions 页面没有任何 run。此时在 Actions 页面「Run workflow」
+> 手动触发一次，或命令行：
+>
+> ```bash
+> gh workflow run build --repo <你的owner>/ClawProxyHubPlugins --ref main
+> ```
+>
+> 工作流也会拉取 `CORE_REPO`（默认 `Sndeok/ClawProxyHub`）到 `.cph-core` 并用
+> `go.work` 的 replace 对着它编译插件，所以核心仓库要先推送、且 CI 能读到。
+
 ```bash
 go run ./tools/pack            # dist/<name>-<version>.cphplugin + dist/index.json
 go run ./tools/pack -only workbuddy
