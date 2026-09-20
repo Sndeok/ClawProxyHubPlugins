@@ -31,7 +31,8 @@ import (
 	"github.com/ShadowSmallBaby/ClawProxyHub/sdk"
 )
 
-const defaultBaseURL = "https://github.com/ShadowSmallBaby/ClawProxyHubPlugins/releases/download"
+// defaultBaseURL 默认发布地址前缀；--base-url 可覆盖（CI 传 github.repository 推导的地址）。
+const defaultBaseURL = "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download"
 
 // platforms 发布包内置的目标平台（核心安装时按 runtime.GOOS/GOARCH 挑选）。
 var platforms = [][2]string{

@@ -46,7 +46,7 @@ go run ./tools/pack -only workbuddy
 - 包格式：zip，含 `manifest.json`、图标与 `plugin-<os>-<arch>[.exe]`（windows/amd64、linux/amd64、linux/arm64、darwin/amd64、darwin/arm64）；固定时间戳，同一输入产出同一 sha256
 - 发布：改 `manifest.json` 的 `version` → 合入 main → CI 为每个新版本创建 Release `<name>-v<version>`（资产 `<name>-<version>.cphplugin`）并回写 `index.json`
 - 已发布版本不可变：改代码必须升版本，否则 CI 跳过该插件
-- 核心默认市场地址：`https://raw.githubusercontent.com/ShadowSmallBaby/ClawProxyHubPlugins/main/index.json`
+- 核心默认市场地址：`https://raw.githubusercontent.com/Sndeok/ClawProxyHubPlugins/main/index.json`
 
 ## 贡献
 

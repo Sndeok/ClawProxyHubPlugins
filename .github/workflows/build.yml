@@ -21,12 +21,32 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       BASE_URL: https://github.com/${{ github.repository }}/releases/download
+      # 插件对着 fork 的核心 SDK 编译：SDK 修复（工具调用增量分组 / 宿主回调）
+      # 随核心仓库走，不必等上游发版。
+      CORE_REPO: Sndeok/ClawProxyHub
+      CORE_REF: main
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      # 拉取核心源码作为 SDK：go.work 的 replace 让插件直接编译 fork 的 sdk 包。
+      # 本地开发同法（go.work 已忽略入库）：
+      #   go work init . && go work edit -replace github.com/ShadowSmallBaby/ClawProxyHub=../ClawProxyHub
+      - name: Fetch core SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPO }}
+          ref: ${{ env.CORE_REF }}
+          path: .cph-core
+
+      - name: Point SDK at forked core
+        run: |
+          go work init .
+          go work edit -replace github.com/ShadowSmallBaby/ClawProxyHub=./.cph-core
+          go env GOWORK
 
       - name: Vet & test
         run: |
