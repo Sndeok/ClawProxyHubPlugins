@@ -321,25 +321,25 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 					"type": "string",
 					"title": "User-Agent",
 					"description": "客户端 UA 伪装值，留空使用内置默认",
-					"default": ""
+					"default": "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"
 				},
 				"client_version": {
 					"type": "string",
 					"title": "客户端版本",
 					"description": "出站 UA 里 WorkBuddy/<版本> 这段，也用于 X-IDE-Version 头；留空用内置默认",
-					"default": ""
+					"default": "5.5.4"
 				},
 				"client_name": {
 					"type": "string",
 					"title": "客户端名称",
 					"description": "用量归属头（X-Product / X-IDE-Name / X-IDE-Type）取值；填 SaaS 可还原旧行为",
-					"default": ""
+					"default": "WorkBuddy"
 				},
 				"cli_version": {
 					"type": "string",
 					"title": "CLI 版本",
 					"description": "出站 UA 里 CLI/<版本> 这段",
-					"default": ""
+					"default": "2.137.1"
 				},
 				"ide_version": {
 					"type": "string",

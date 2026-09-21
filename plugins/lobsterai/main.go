@@ -374,7 +374,7 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 					"type": "string",
 					"title": "客户端版本号",
 					"description": "请求头 X-LobsterAI-Client-Version 的伪装值，留空使用内置默认",
-					"default": ""
+					"default": "2026.8.21"
 				},
 				"user_agent": {
 					"type": "string",
@@ -386,7 +386,7 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 					"type": "string",
 					"title": "客户端名称",
 					"description": "出站 UA 第一段，留空 = LobsterAI",
-					"default": ""
+					"default": "LobsterAI"
 				},
 				"cli_version": {
 					"type": "string",
