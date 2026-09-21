@@ -1,26 +1,26 @@
 [
   {
     "name": "lobsterai",
-    "version": "0.1.7",
+    "version": "0.1.8",
     "author": "cph",
     "label": {
       "en": "LobsterAI",
       "zh": "LobsterAI"
     },
     "published_at": "2026-09-21",
-    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/lobsterai-v0.1.7/lobsterai-0.1.7.cphplugin",
-    "sha256": "27cbf89c1ff5f66b9fd65d7e647a516b86afe0fc2392d08b9803ce164c4d1733"
+    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/lobsterai-v0.1.8/lobsterai-0.1.8.cphplugin",
+    "sha256": "6f4377c007e5018087897e122c50cd3dd4b68df029f8fcd62b2929c9face5c85"
   },
   {
     "name": "workbuddy",
-    "version": "0.1.7",
+    "version": "0.1.8",
     "author": "cph",
     "label": {
       "en": "WorkBuddy",
       "zh": "WorkBuddy"
     },
     "published_at": "2026-09-21",
-    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/workbuddy-v0.1.7/workbuddy-0.1.7.cphplugin",
-    "sha256": "7a6bd67ef49ce05a21c97d97acd68146e3c8dd51e297df5460f8312a0c021e7d"
+    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/workbuddy-v0.1.8/workbuddy-0.1.8.cphplugin",
+    "sha256": "79333e00f587a9b17a2ca877f630f52ef4c0a430082868e4db9aea9f9b0bb992"
   }
 ]
