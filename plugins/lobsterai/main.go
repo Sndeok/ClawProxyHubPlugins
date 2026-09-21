@@ -182,9 +182,31 @@ func (p *plugin) clientVersion() string {
 	return defaultClientVer
 }
 
-// userAgentStr 请求头 User-Agent（用户可配置；空 = 不设置，上游不校验）。
+// clientName 客户端名称（用量归属 / UA 第一段），留空用内置默认。
+func (p *plugin) clientName() string {
+	if v := p.settingStr("client_name"); v != "" {
+		return v
+	}
+	return "LobsterAI"
+}
+
+// cliVersion 出站 UA 里 CLI/<版本> 这段。
+func (p *plugin) cliVersion() string {
+	return p.settingStr("cli_version")
+}
+
+// userAgentStr 出站 User-Agent：优先用整段自定义值，否则按
+// <客户端名称>/<客户端版本> <客户端名称>/<客户端版本> CLI/<CLI 版本> 拼装。
 func (p *plugin) userAgentStr() string {
-	return p.settingStr("user_agent")
+	if v := p.settingStr("user_agent"); v != "" {
+		return v
+	}
+	name, ver := p.clientName(), p.clientVersion()
+	parts := []string{name + "/" + ver, name + "/" + ver}
+	if cli := p.cliVersion(); cli != "" {
+		parts = append(parts, "CLI/"+cli)
+	}
+	return strings.Join(parts, " ")
 }
 
 // settingStr 读插件设置（核心管理界面在线编辑），30s 内存缓存。
@@ -357,7 +379,19 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 				"user_agent": {
 					"type": "string",
 					"title": "User-Agent",
-					"description": "请求头 User-Agent 伪装值，留空则不设置（上游不校验）",
+					"description": "整段出站 UA；留空则用下面的客户端名称/版本 + CLI 版本拼装",
+					"default": ""
+				},
+				"client_name": {
+					"type": "string",
+					"title": "客户端名称",
+					"description": "出站 UA 第一段，留空 = LobsterAI",
+					"default": ""
+				},
+				"cli_version": {
+					"type": "string",
+					"title": "CLI 版本",
+					"description": "出站 UA 里 CLI/<版本> 这段，留空则不拼该段",
 					"default": ""
 				}
 			}

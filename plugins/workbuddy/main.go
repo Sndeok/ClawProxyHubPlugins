@@ -41,6 +41,9 @@ const (
 	// 客户端标识默认值：可被插件设置覆盖（user_agent / ide_version）
 	defaultUserAgent  = "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"
 	defaultIDEVersion = "5.5.4"
+	// 出站标识分段默认值：可被插件设置 / 全局设置覆盖
+	defaultClientName = "WorkBuddy"
+	defaultCLIVersion = "2.137.1"
 )
 
 // version 插件版本：打包时经 -ldflags "-X main.version=..." 注入（源码直跑为 dev）。
@@ -62,14 +65,18 @@ func (p *plugin) SetHost(host *sdk.Host) { p.host = host }
 
 // 当前生效的客户端标识（ensureIdentity 刷新；telemetry 等包级代码读取）。
 var (
-	identMu     sync.RWMutex
-	identUA     = defaultUserAgent
-	identIDEVer = defaultIDEVersion
+	identMu       sync.RWMutex
+	identUA       = defaultUserAgent
+	identIDEVer   = defaultIDEVersion
+	identClientNm = defaultClientName
 )
 
 func clientUA() string { identMu.RLock(); defer identMu.RUnlock(); return identUA }
 
 func clientIDEVersion() string { identMu.RLock(); defer identMu.RUnlock(); return identIDEVer }
+
+// clientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type）。
+func clientName() string { identMu.RLock(); defer identMu.RUnlock(); return identClientNm }
 
 // versionFromUA 从 UA 提取版本号（首个 "/" 后到空格前的段）。
 func versionFromUA(ua string) string {
@@ -94,14 +101,31 @@ func (p *plugin) ensureIdentity() {
 		return
 	}
 	ua, ver := defaultUserAgent, ""
+	name, cli := defaultClientName, defaultCLIVersion
 	if p.host != nil {
 		if raw := p.host.Settings("workbuddy"); len(raw) > 0 {
 			var cfg map[string]string
 			if json.Unmarshal(raw, &cfg) == nil {
+				if cfg["client_name"] != "" {
+					name = cfg["client_name"]
+				}
+				if cfg["cli_version"] != "" {
+					cli = cfg["cli_version"]
+				}
+				// 客户端版本：client_version 优先，兼容旧的 ide_version
+				ver = cfg["client_version"]
+				if ver == "" {
+					ver = cfg["ide_version"]
+				}
 				if cfg["user_agent"] != "" {
 					ua = cfg["user_agent"]
+				} else {
+					// 没给整段 UA 时按分段拼装（与内置默认同构）
+					if ver == "" {
+						ver = defaultIDEVersion
+					}
+					ua = fmt.Sprintf("%s/%s %s/%s CLI/%s", name, ver, name, ver, cli)
 				}
-				ver = cfg["ide_version"]
 			}
 		}
 	}
@@ -112,7 +136,7 @@ func (p *plugin) ensureIdentity() {
 		ver = defaultIDEVersion
 	}
 	identMu.Lock()
-	identUA, identIDEVer = ua, ver
+	identUA, identIDEVer, identClientNm = ua, ver, name
 	identMu.Unlock()
 	p.mu.Lock()
 	p.settingsJSON, p.settingsAt = []byte("cached"), time.Now()
@@ -216,11 +240,11 @@ func (p *plugin) headers(cred *credential, auth bool) map[string]string {
 		"X-Tenant-Id":                 cred.Account.EnterpriseID,
 		"X-Domain":                    domain,
 		"User-Agent":                  clientUA(),
-		"X-IDE-Type":                  "WorkBuddy",
-		"X-IDE-Name":                  "WorkBuddy",
+		"X-IDE-Type":                  clientName(),
+		"X-IDE-Name":                  clientName(),
 		"X-IDE-Version":               clientIDEVersion(),
 		"X-Private-Data":              "false",
-		"X-Product":                   "SaaS",
+		"X-Product":                   clientName(),
 		"x-stainless-arch":            "x64",
 		"x-stainless-lang":            "js",
 		"x-stainless-os":              "Windows",
@@ -299,10 +323,28 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 					"description": "客户端 UA 伪装值，留空使用内置默认",
 					"default": ""
 				},
+				"client_version": {
+					"type": "string",
+					"title": "客户端版本",
+					"description": "出站 UA 里 WorkBuddy/<版本> 这段，也用于 X-IDE-Version 头；留空用内置默认",
+					"default": ""
+				},
+				"client_name": {
+					"type": "string",
+					"title": "客户端名称",
+					"description": "用量归属头（X-Product / X-IDE-Name / X-IDE-Type）取值；填 SaaS 可还原旧行为",
+					"default": ""
+				},
+				"cli_version": {
+					"type": "string",
+					"title": "CLI 版本",
+					"description": "出站 UA 里 CLI/<版本> 这段",
+					"default": ""
+				},
 				"ide_version": {
 					"type": "string",
-					"title": "IDE 版本号",
-					"description": "X-IDE-Version 与埋点字段，留空则从 User-Agent 解析",
+					"title": "IDE 版本号（旧）",
+					"description": "兼容旧配置；client_version 为空时才会用它",
 					"default": ""
 				}
 			}
@@ -589,9 +631,9 @@ func browserAuthHeaders(accessToken string) map[string]string {
 		"Content-Type": "application/json",
 		"User-Agent":   clientUA(),
 		"X-Domain":     "copilot.tencent.com",
-		"X-Product":    "SaaS",
-		"X-IDE-Type":   "WorkBuddy",
-		"X-IDE-Name":   "WorkBuddy",
+		"X-Product":    clientName(),
+		"X-IDE-Type":   clientName(),
+		"X-IDE-Name":   clientName(),
 		"X-Request-ID": randHex(16),
 	}
 	if accessToken != "" {
