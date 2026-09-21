@@ -22,10 +22,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/ShadowSmallBaby/ClawProxyHub/sdk"
-	"github.com/ShadowSmallBaby/ClawProxyHub/sdk/anthropicup"
-	"github.com/ShadowSmallBaby/ClawProxyHub/sdk/openaiup"
-	pb "github.com/ShadowSmallBaby/ClawProxyHub/sdk/proto/cphv1"
+	"github.com/Sndeok/ClawProxyHub-Next/sdk"
+	"github.com/Sndeok/ClawProxyHub-Next/sdk/anthropicup"
+	"github.com/Sndeok/ClawProxyHub-Next/sdk/openaiup"
+	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
 const (

@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ShadowSmallBaby/ClawProxyHub/sdk"
+	"github.com/Sndeok/ClawProxyHub-Next/sdk"
 )
 
 // defaultBaseURL 默认发布地址前缀；--base-url 可覆盖（CI 传 github.repository 推导的地址）。

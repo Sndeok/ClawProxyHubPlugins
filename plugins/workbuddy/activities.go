@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 
-	pb "github.com/ShadowSmallBaby/ClawProxyHub/sdk/proto/cphv1"
+	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
 const (
