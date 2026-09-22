@@ -147,6 +147,8 @@ func (p *plugin) clineHeaders(cred *clineCred, sessionID string) map[string]stri
 		"X-CLIENT-VERSION":   ver,
 		"X-PLATFORM":         "terminal",
 		"X-PLATFORM-VERSION": ver,
+		// 流式必须 identity：gzip 会把 SSE 缓冲成一次性下发（打字机效果消失）
+		"Accept-Encoding": "identity",
 	}
 	if sessionID != "" {
 		h["X-Task-ID"] = sessionID

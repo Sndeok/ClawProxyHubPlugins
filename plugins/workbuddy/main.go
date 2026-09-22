@@ -1227,26 +1227,35 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	body["model"] = orDefault(req.Model, "auto")
 	desensitizeMessageBody(body) // system 净化：客户端特征改写 + 合规声明脱敏
 
-	resp, err := postJSON(ctx, p.hc(cred), upstreamBase+pathChat, p.headers(cred, true), body)
+	// 流式必须 identity：gzip 会把上游 SSE 缓冲成一次性下发（打字机效果消失）
+	h := p.headers(cred, true)
+	h["Accept-Encoding"] = "identity"
+	resp, err := postJSON(ctx, p.hc(cred), upstreamBase+pathChat, h, body)
 	if err != nil {
 		return stream.Send(failed(502, err.Error()))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		code := int32(502)
-		if resp.StatusCode == 401 {
-			code = 401
-		}
+		// 402 额度不足 / 429 限流 / 401·403 凭据失效按语义上报：核心据此暂停账号或换号
+		code := mapUpstreamStatus(resp.StatusCode, string(raw))
 		// 完整上游返回随事件回核心（落库到日志详情，排 400/500 靠它）
 		detail := fmt.Sprintf("HTTP %d %s\n%s", resp.StatusCode, resp.Status, string(raw))
 		return stream.Send(failedDetail(code, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(string(raw), 300)), detail))
 	}
 
-	if err := stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_MessageStart{
-		MessageStart: &pb.MessageStart{Model: req.Model},
-	}}); err != nil {
-		return err
+	// 延迟首发：拿到第一段有效内容才发 MessageStart。上游空流 / 纯错误帧时把失败作为
+	// **首事件**上报，核心才会按 429 暂停该账号并换号重试；提前发过 MessageStart 只会报错。
+	var contentDeltas, toolDeltas int
+	started := false
+	ensureStart := func() {
+		if started {
+			return
+		}
+		started = true
+		_ = stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_MessageStart{
+			MessageStart: &pb.MessageStart{Model: req.Model},
+		}})
 	}
 
 	// 内容审核识别：上游命中审核是「200 + 固定拒绝文案」，直接透传会让客户端把它
@@ -1255,10 +1264,16 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	parser := openaiup.NewParser(func(ev *pb.StreamEvent) {
 		switch e := ev.Event.(type) {
 		case *pb.StreamEvent_ContentDelta:
+			contentDeltas++
 			if replyBuf.Len() < 4096 {
 				replyBuf.WriteString(e.ContentDelta.Text)
 			}
+		case *pb.StreamEvent_ToolCallDelta:
+			toolDeltas++
 		case *pb.StreamEvent_MessageFinish:
+			if contentDeltas == 0 && toolDeltas == 0 {
+				return // 空响应的结束帧先吞掉，交给末尾判定
+			}
 			if e.MessageFinish != nil && isContentFilterText(replyBuf.String()) {
 				e.MessageFinish.FinishReason = "content_filter"
 				if p.host != nil {
@@ -1266,28 +1281,56 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 				}
 			}
 		}
+		ensureStart()
 		_ = stream.Send(ev)
 	})
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	sawEvent := false
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data:") && !strings.Contains(line, "[DONE]") {
-			sawEvent = true
-		}
-		parser.Feed(line)
+		parser.Feed(scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
+		if contentDeltas == 0 && toolDeltas == 0 {
+			return stream.Send(failed(502, "上游流中断（无有效内容）: "+err.Error()))
+		}
 		parser.FinishWithError(502, "upstream stream broken: "+err.Error())
 		return nil
 	}
-	if !sawEvent {
-		parser.FinishWithError(502, "upstream returned an empty stream")
-		return nil
+	if contentDeltas == 0 && toolDeltas == 0 {
+		return stream.Send(failed(429, "上游返回空内容：已暂停该账号并换号重试"))
 	}
 	parser.Finish()
 	return nil
+}
+
+// mapUpstreamStatus 上游 HTTP 状态 → 核心语义状态。
+// 402 = 额度不足（核心暂停账号并换号）；429 = 限流（核心暂停 10 分钟后自动恢复）；
+// 401/403 = 凭据失效。其余一律 502，避免把上游故障误判成账号问题。
+func mapUpstreamStatus(status int, body string) int32 {
+	lower := strings.ToLower(body)
+	switch status {
+	case 401:
+		return 401
+	case 402:
+		return 402
+	case 429:
+		return 429
+	case 403:
+		if strings.Contains(lower, "credit") || strings.Contains(lower, "quota") ||
+			strings.Contains(lower, "额度") || strings.Contains(lower, "余额") {
+			return 402
+		}
+		return 401
+	}
+	switch {
+	case strings.Contains(lower, "unauthorized") || strings.Contains(lower, "登录已过期") || strings.Contains(lower, "invalid token"):
+		return 401
+	case strings.Contains(lower, "额度") || strings.Contains(lower, "余额不足") || strings.Contains(lower, "insufficient"):
+		return 402
+	case strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many") || strings.Contains(lower, "限流"):
+		return 429
+	}
+	return 502
 }
 
 // ---------- 任务能力：每日签到 ----------

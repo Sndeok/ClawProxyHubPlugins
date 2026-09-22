@@ -119,6 +119,8 @@ func (p *plugin) ccHeaders(cred *ccCred, sessionID string) map[string]string {
 		"x-session-id":           sessionID,
 		"Authorization":          "Bearer " + cred.APIKey,
 		"traceparent":            traceparent(),
+		// 流式必须 identity：gzip 会把事件流缓冲成一次性下发
+		"Accept-Encoding": "identity",
 	}
 	if p.zdr() {
 		h["x-cmd-zdr"] = "1"

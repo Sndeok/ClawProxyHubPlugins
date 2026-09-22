@@ -13,6 +13,20 @@
 | `commandcode` | Command Code（api.commandcode.ai）：user_ Key + 设备指纹伪装 + lifecycle 上报，AI-SDK 事件流 |
 | `joycode` | 京东 JoyCode（joycode-api.jd.com）：京东账号扫码授权 / 粘贴 ptKey+userId，color 网关 HMAC 签名，GLM / Kimi / MiniMax / Doubao / Claude-Opus 等模型 |
 
+## 插件统一约定
+
+所有插件在流式对话上遵循同一套约定，保证核心能做正确的容错决策：
+
+- **延迟首发**：拿到第一段有效内容后才发 `MessageStart`。上游返回空流 / 纯错误帧时，
+  失败以**首事件**上报（429），核心据此暂停该账号并换号重试；提前发过 `MessageStart` 就只能报错给客户端。
+- **语义化状态**：`401/403` 凭据失效、`402` 额度不足（核心暂停账号）、`429` 限流（核心暂停 10 分钟后自动恢复）、
+  其余归 `502`；错误事件带 `detail`（完整上游返回）落库到调用日志。
+- **流式禁用压缩**：出站带 `Accept-Encoding: identity`，避免 gzip 阻塞 SSE 分块（打字机效果消失）。
+- **失败可诊断**：上游 HTTP 200 内嵌的错误体、SSE 错误帧都会进日志详情，而不是退化成「空响应」。
+
+核心侧对应能力：对话 UA 三级解析（路由 UA > 全局网关 UA > 客户端自带，`extra.client_user_agent`）、
+按入口协议下发的客户端指纹头（`extra.fingerprint_headers`，Claude Code / Codex）。插件按需采用，
+默认保持各自上游要求的官方客户端指纹。
 ## 目录约定
 
 ```

@@ -141,6 +141,8 @@ func (p *plugin) headers(cred *openCred, protocol, sessionID, requestID string) 
 		"X-Session-Id":       sessionID,
 		"x-opencode-request": requestID,
 		"x-opencode-project": "prj_" + hashHex("project\x00"+orDefault(cred.UID, "anonymous"), 12),
+		// 流式必须 identity：gzip 会把 SSE 缓冲成一次性下发（打字机效果消失）
+		"Accept-Encoding": "identity",
 	}
 	if protocol == protocolMsgs {
 		// Anthropic 方言用 x-api-key，不是 Bearer

@@ -205,6 +205,8 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	if err := sess.ApplyHeaders(httpReq, headerCfg(), encoded, cred.UID, modelKey); err != nil {
 		return stream.Send(failed(500, err.Error()))
 	}
+	// 流式必须 identity：gzip 会把 SSE 缓冲成一次性下发（打字机效果消失）
+	httpReq.Header.Set("Accept-Encoding", "identity")
 	resp, err := p.httpClient(cred).Do(httpReq)
 	if err != nil {
 		return stream.Send(failed(502, "上游连接失败: "+err.Error()))
@@ -216,35 +218,56 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		return stream.Send(failedDetail(mapUpstreamStatus(resp.StatusCode), fmt.Sprintf("HTTP %d: %s", resp.StatusCode, clip(string(raw), 300)), detail))
 	}
 
-	if err := stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_MessageStart{
-		MessageStart: &pb.MessageStart{Model: req.Model},
-	}}); err != nil {
-		return err
+	// 延迟首发：拿到第一段有效内容才发 MessageStart。上游空流 / 建流后报错时必须把失败
+	// 作为**首事件**上报，核心才会按 429 暂停该账号并换号重试；提前发过 MessageStart 只会报错。
+	var contentDeltas, toolDeltas int
+	started := false
+	ensureStart := func() {
+		if started {
+			return
+		}
+		started = true
+		_ = stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_MessageStart{
+			MessageStart: &pb.MessageStart{Model: req.Model},
+		}})
 	}
-
-	parser := openaiup.NewParser(func(ev *pb.StreamEvent) { _ = stream.Send(ev) })
+	parser := openaiup.NewParser(func(ev *pb.StreamEvent) {
+		switch ev.Event.(type) {
+		case *pb.StreamEvent_ContentDelta:
+			contentDeltas++
+		case *pb.StreamEvent_ToolCallDelta:
+			toolDeltas++
+		case *pb.StreamEvent_MessageFinish:
+			if contentDeltas == 0 && toolDeltas == 0 {
+				return // 空响应的结束帧先吞掉，交给末尾判定
+			}
+		}
+		ensureStart()
+		_ = stream.Send(ev)
+	})
 	scanner := bufio.NewScanner(qodersign.WrapNested(resp.Body))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	sawEvent := false
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data:") && !strings.Contains(line, "[DONE]") {
-			sawEvent = true
-		}
-		parser.Feed(line)
+		parser.Feed(scanner.Text())
 	}
+	empty := contentDeltas == 0 && toolDeltas == 0
 	if err := scanner.Err(); err != nil {
 		// 信封错误（HTTP 200 建流后 provider 报错）单独映射，便于核心换号
 		var ee *qodersign.EnvelopeError
 		if asEnvelopeError(err, &ee) {
-			return stream.Send(failed(mapUpstreamStatus(ee.StatusCode), ee.Error()))
+			if empty {
+				return stream.Send(failed(mapUpstreamStatus(ee.StatusCode), ee.Error()))
+			}
+			return stream.Send(failedDetail(mapUpstreamStatus(ee.StatusCode), "上游建流后报错: "+ee.Error(), ee.Error()))
+		}
+		if empty {
+			return stream.Send(failed(502, "上游流中断（无有效内容）: "+err.Error()))
 		}
 		parser.FinishWithError(502, "上游流中断: "+err.Error())
 		return nil
 	}
-	if !sawEvent {
-		parser.FinishWithError(502, "上游返回了空流")
-		return nil
+	if empty {
+		return stream.Send(failed(429, "上游返回空内容：已暂停该账号并换号重试"))
 	}
 	parser.Finish()
 	return nil
