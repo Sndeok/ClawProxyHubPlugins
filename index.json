@@ -85,14 +85,14 @@
   },
   {
     "name": "workbuddy",
-    "version": "0.1.12",
+    "version": "0.1.14",
     "author": "cph",
     "label": {
       "en": "WorkBuddy",
       "zh": "WorkBuddy"
     },
     "published_at": "2026-09-22",
-    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/workbuddy-v0.1.12/workbuddy-0.1.12.cphplugin",
-    "sha256": "3b1647fd2a1991bdebf888d353416b965df14060e78328567ad33bd39a67d05c"
+    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/workbuddy-v0.1.14/workbuddy-0.1.14.cphplugin",
+    "sha256": "6f39c002aff5a2450448f309cde7b83bdd65fa2b73e56ba4fbf6c80a51774e29"
   }
 ]
