@@ -1137,7 +1137,9 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		if resp.StatusCode == 401 {
 			code = 401
 		}
-		return stream.Send(failed(code, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(string(raw), 300))))
+		// 完整上游返回随事件回核心（落库到日志详情，排 400/500 靠它）
+		detail := fmt.Sprintf("HTTP %d %s\n%s", resp.StatusCode, resp.Status, string(raw))
+		return stream.Send(failedDetail(code, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(string(raw), 300)), detail))
 	}
 
 	if err := stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_MessageStart{
@@ -1450,6 +1452,14 @@ func withKeyfrom(body map[string]interface{}, cred *credential, version string) 
 func failed(code int32, msg string) *pb.StreamEvent {
 	return &pb.StreamEvent{Event: &pb.StreamEvent_TaskFailed{
 		TaskFailed: &pb.TaskFailed{Error: &pb.Error{Code: code, Message: msg}},
+	}}
+}
+
+// failedDetail 失败事件带完整上游返回：核心落库 request_logs.error_detail，
+// 日志详情直接展示（message 仍保持短摘要，列表不被大字段拖累）。
+func failedDetail(code int32, msg, detail string) *pb.StreamEvent {
+	return &pb.StreamEvent{Event: &pb.StreamEvent_TaskFailed{
+		TaskFailed: &pb.TaskFailed{Error: &pb.Error{Code: code, Message: msg}, Detail: detail},
 	}}
 }
 
