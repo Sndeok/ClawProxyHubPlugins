@@ -262,31 +262,58 @@ func fetchModels(ctx context.Context, client *http.Client) ([]clineModel, error)
 	return out.Data, nil
 }
 
-// fetchRecommended 拉官方推荐清单：free（免费额度）/ clinePass（通行证）。
-func fetchRecommended(ctx context.Context, client *http.Client) (free, pass []recommendedModel, err error) {
+// clineCatalog 官方推荐清单的四个通道。
+// 上游 /ai/cline/recommended-models 返回 recommended / free / clinePass / clineCloud
+// 四组 —— 早期实现只解析了 free 与 clinePass，导致 client 里看得到的模型（如
+// moonshotai/kimi-k3、cline-cloud/kimi-k3）在插件侧不可见。
+type clineCatalog struct {
+	Recommended []recommendedModel // 官方精选（带 NEW 标签）
+	Free        []recommendedModel // 免费额度
+	ClinePass   []recommendedModel // 通行证
+	ClineCloud  []recommendedModel // 云通道
+}
+
+// fetchRecommended 拉官方推荐清单（四个通道全解析）。
+func fetchRecommended(ctx context.Context, client *http.Client) (*clineCatalog, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", clineAPIBase+clineFreeListPath, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (cph-cline)")
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode >= 400 {
-		return nil, nil, fmt.Errorf("推荐清单 HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("推荐清单 HTTP %d", resp.StatusCode)
 	}
-	var out struct {
-		Free      []recommendedModel `json:"free"`
-		ClinePass []recommendedModel `json:"clinePass"`
-	}
+	var out clineCatalog
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return out.Free, out.ClinePass, nil
+	return &out, nil
+}
+
+// shortModelName 取模型 id 的短名：`moonshotai/kimi-k3` → `kimi-k3`、
+// `cline-pass/mimo-v2.6-flash` → `mimo-v2.6-flash`、`poolside/x:free` → `x`。
+func shortModelName(id string) string {
+	s := id
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	return strings.TrimSuffix(strings.TrimSpace(s), ":free")
+}
+
+// freeChannelAlias 免费通道别名：官方免费通道按 `cline-free/<短名>` 取模型
+// （实测 cline-free/kimi-k3 可用，而它只出现在 recommended / clinePass 里）。
+func freeChannelAlias(id string) string {
+	if short := shortModelName(id); short != "" {
+		return "cline-free/" + short
+	}
+	return ""
 }
 
 // ---------- SSE 解包 ----------

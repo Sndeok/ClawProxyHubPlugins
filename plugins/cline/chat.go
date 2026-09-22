@@ -36,15 +36,22 @@ var freeWhitelist = map[string]bool{
 
 // ---------- 模型目录 ----------
 
-// ListModels 汇总对外可用模型：官方推荐清单（免费 / 通行证）+ 公开目录里的免费白名单。
-// 全部免费通道，不需要 credits —— 与参考实现一致，不把 445 条付费目录整段暴露。
+// ListModels 汇总对外可用模型：
+//  1. 官方精选 recommended（客户端里带 NEW 标签的那批）
+//  2. 免费额度 free
+//  3. 免费通道别名 cline-free/<短名>（官方免费通道按「通道/短名」取模型）
+//  4. 通行证 clinePass、云通道 clineCloud
+//  5. 公开目录里带 :free 后缀或在内置白名单里的
+//  6. 插件设置 extra_models 手动补充的
+//
+// 不把 444 条付费目录整段暴露；免费通道别名单列标签，可用性取决于上游额度政策。
 func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.ModelList, error) {
 	cred, err := credFrom(blob)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	client := p.httpClient(cred)
-	free, pass, err := fetchRecommended(ctx, client)
+	cat, err := fetchRecommended(ctx, client)
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
@@ -62,11 +69,23 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 		seen[id] = true
 		list = append(list, entry{id: id, name: orDefault(name, id), desc: desc, tags: tags})
 	}
-	for _, m := range free {
+	for _, m := range cat.Recommended {
+		add(m.ID, m.Name, m.Description, "推荐")
+	}
+	for _, m := range cat.Free {
 		add(m.ID, m.Name, m.Description, "免费")
 	}
-	for _, m := range pass {
+	// 免费通道别名：短名取自精选与通行证清单（client 里可见的免费模型大多走这条）
+	for _, m := range append(append([]recommendedModel{}, cat.Recommended...), cat.ClinePass...) {
+		if alias := freeChannelAlias(m.ID); alias != "" {
+			add(alias, alias, "免费通道（实验）：可用性取决于上游额度政策", "免费通道")
+		}
+	}
+	for _, m := range cat.ClinePass {
 		add(m.ID, m.Name, m.Description, "通行证")
+	}
+	for _, m := range cat.ClineCloud {
+		add(m.ID, m.Name, m.Description, "云通道")
 	}
 	if all, err := fetchModels(ctx, client); err == nil {
 		for _, m := range all {
@@ -75,6 +94,9 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 				add(id, id, "", "免费")
 			}
 		}
+	}
+	for _, id := range p.extraModels() {
+		add(id, id, "手动补充（插件设置 extra_models）", "自定义")
 	}
 	if len(list) == 0 {
 		return nil, status.Error(codes.Unavailable, "上游没有可用模型")
@@ -267,22 +289,25 @@ func sectionNote(id, title, detail string) *pb.ProfileSection {
 	}
 }
 
-// modelSection 免费 / 通行证模型清单（详情页动态渲染）。
-func modelSection(free, pass []recommendedModel) *pb.ProfileSection {
+// modelSection 官方推荐清单四通道（详情页动态渲染）。
+func modelSection(cat *clineCatalog) *pb.ProfileSection {
 	sec := &pb.ProfileSection{
 		Id:    "models",
-		Title: map[string]string{"zh": "可用模型（免费额度）", "en": "Available models (free)"},
+		Title: map[string]string{"zh": "可用模型（官方推荐清单）", "en": "Available models (catalog)"},
 		Columns: []*pb.SectionColumn{
 			{Key: "id", Title: map[string]string{"zh": "模型", "en": "Model"}},
 			{Key: "kind", Title: map[string]string{"zh": "通道", "en": "Lane"}},
 		},
 	}
-	for _, m := range free {
-		sec.Items = append(sec.Items, &pb.SectionRow{Cells: map[string]string{"id": m.ID, "kind": "免费"}})
+	add := func(ms []recommendedModel, kind string) {
+		for _, m := range ms {
+			sec.Items = append(sec.Items, &pb.SectionRow{Cells: map[string]string{"id": m.ID, "kind": kind}})
+		}
 	}
-	for _, m := range pass {
-		sec.Items = append(sec.Items, &pb.SectionRow{Cells: map[string]string{"id": m.ID, "kind": "通行证"}})
-	}
+	add(cat.Recommended, "推荐")
+	add(cat.Free, "免费")
+	add(cat.ClinePass, "通行证")
+	add(cat.ClineCloud, "云通道")
 	if len(sec.Items) == 0 {
 		return sectionNote("models", "可用模型", "上游未返回推荐模型清单")
 	}

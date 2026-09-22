@@ -112,6 +112,12 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 					"description": "X-CLIENT-VERSION / X-PLATFORM-VERSION / User-Agent 里的版本号；留空 = 3.0.47",
 					"default": "3.0.47"
 				},
+				"extra_models": {
+					"type": "string",
+					"title": "额外模型（手动补充）",
+					"description": "逗号或换行分隔。补充上游清单未列出但实测可用的模型，例如 cline-free/kimi-k3",
+					"default": ""
+				},
 				"extra_headers": {
 					"type": "string",
 					"title": "额外请求头",
@@ -234,14 +240,38 @@ func (p *plugin) profileFor(ctx context.Context, cred *clineCred) *pb.AccountPro
 		Healthy:     true,
 		Quota:       map[string]string{},
 	}
-	free, pass, err := fetchRecommended(ctx, p.httpClient(cred))
+	cat, err := fetchRecommended(ctx, p.httpClient(cred))
 	if err != nil {
 		prof.Sections = append(prof.Sections, sectionNote("catalog_error", "模型目录不可达", err.Error()))
 		return prof
 	}
-	prof.Quota["free_models"] = fmt.Sprintf("%d", len(free))
-	prof.Sections = append(prof.Sections, modelSection(free, pass))
+	prof.Quota["free_models"] = fmt.Sprintf("%d", len(cat.Free))
+	prof.Quota["catalog_total"] = fmt.Sprintf("%d",
+		len(cat.Recommended)+len(cat.Free)+len(cat.ClinePass)+len(cat.ClineCloud))
+	prof.Sections = append(prof.Sections, modelSection(cat))
 	return prof
+}
+
+// extraModels 插件设置 extra_models 的手动补充模型。
+func (p *plugin) extraModels() []string {
+	return parseExtraModels(str(p.settings()["extra_models"]))
+}
+
+// parseExtraModels 解析补充模型清单（逗号 / 分号 / 换行分隔，去空白与空项）。
+func parseExtraModels(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ';'
+	}) {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // ---------- 工具 ----------

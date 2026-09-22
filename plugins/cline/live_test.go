@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
 // 线上联调测试：默认跳过，用 CPH_CLINE_LIVE=1 开启。
@@ -63,12 +65,45 @@ func TestLivePublicCatalogs(t *testing.T) {
 	}
 	t.Logf("公开模型目录 %d 条，例如 %s", len(models), models[0].ID)
 
-	free, pass, err := fetchRecommended(ctx, client)
+	cat, err := fetchRecommended(ctx, client)
 	if err != nil {
 		t.Fatalf("推荐清单读取失败: %v", err)
 	}
-	if len(free) == 0 {
+	if len(cat.Free) == 0 {
 		t.Error("免费模型清单为空")
 	}
-	t.Logf("免费 %d 条 / 通行证 %d 条，免费示例 %s", len(free), len(pass), free[0].ID)
+	t.Logf("推荐 %d / 免费 %d / 通行证 %d / 云通道 %d；免费示例 %s",
+		len(cat.Recommended), len(cat.Free), len(cat.ClinePass), len(cat.ClineCloud), cat.Free[0].ID)
+}
+
+// 真实目录回归：用公开推荐接口跑一遍 ListModels，确认客户端可见的模型
+// （含 cline-free/<短名> 免费通道别名）都在插件输出里。不需要真实凭据。
+func TestLiveListModelsRealCatalog(t *testing.T) {
+	requireLive(t)
+	p := &plugin{}
+	blob := &pb.CredentialBlob{Blob: []byte(`{"refresh_token":"dummy-for-public-catalog"}`)}
+	ml, err := p.ListModels(context.Background(), blob)
+	if err != nil {
+		t.Fatalf("ListModels 失败: %v", err)
+	}
+	ids := map[string]bool{}
+	var freeAliases []string
+	for _, m := range ml.Models {
+		ids[m.Id] = true
+		if strings.HasPrefix(m.Id, "cline-free/") {
+			freeAliases = append(freeAliases, m.Id)
+		}
+	}
+	t.Logf("目录共 %d 个模型；cline-free/* 别名 %d 个", len(ml.Models), len(freeAliases))
+	if len(freeAliases) > 0 {
+		t.Logf("免费通道别名示例: %s", strings.Join(freeAliases[:min(5, len(freeAliases))], ", "))
+	}
+	// 上游推荐清单里 kimi-k3 出现在 recommended / clinePass / clineCloud ——
+	// 免费通道别名必须据此生成（用户实测 cline-free/kimi-k3 可用）
+	if !ids["cline-free/kimi-k3"] {
+		t.Errorf("缺少 cline-free/kimi-k3（免费通道别名）")
+	}
+	if !ids["cline-pass/kimi-k3"] && !ids["moonshotai/kimi-k3"] && !ids["cline-cloud/kimi-k3"] {
+		t.Errorf("缺少 kimi-k3 的任一通道条目")
+	}
 }

@@ -19,13 +19,18 @@ import (
 )
 
 // Cline 的 WorkOS 设备授权常量（与官方客户端一致）。
+// clineAPIBase / clineRegisterURL / clineRefreshURL 走 var 而非 const：
+// 单测用 httptest 覆盖它们做模型目录与凭据链路的回归。
+var (
+	clineAPIBase     = "https://api.cline.bot/api/v1"
+	clineRegisterURL = clineAPIBase + "/auth/register"
+	clineRefreshURL  = clineAPIBase + "/auth/refresh"
+)
+
 const (
 	workosClientID   = "client_01K3A541FN8TA3EPPHTD2325AR"
 	workosDeviceURL  = "https://api.workos.com/user_management/authorize/device"
 	workosAuthURL    = "https://api.workos.com/user_management/authenticate"
-	clineAPIBase     = "https://api.cline.bot/api/v1"
-	clineRegisterURL = clineAPIBase + "/auth/register"
-	clineRefreshURL  = clineAPIBase + "/auth/refresh"
 	deviceGrantType  = "urn:ietf:params:oauth:grant-type:device_code"
 	defaultDeviceTTL = 300 * time.Second
 )
