@@ -15,13 +15,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 
 	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
+
+// pathPricingCatalog 公开定价目录（无需鉴权）：倍率 / 上下文 / 推理档位的兜底来源。
+const pathPricingCatalog = "/api/models/pricing-catalog"
 
 // normKey 归一化 key：小写 + 去掉下划线/连字符/空格，便于别名比对。
 func normKey(s string) string {
@@ -41,7 +47,7 @@ var aliasGroups = map[string][]string{
 	"id":            {"modelid", "id", "model", "key"},
 	"apiformat":     {"apiformat", "format", "protocol", "dialect"},
 	"name":          {"modelname", "displayname", "name", "label", "title"},
-	"series":        {"provider", "series", "vendor", "family", "category", "brand"},
+	"series":        {"series", "family", "category", "vendor", "brand", "providerlabel", "provider"},
 	"context":       {"contextwindow", "contextlength", "maxinputtokens", "maxcontexttokens", "contextsize", "inputtokenlimit", "context"},
 	"maxoutput":     {"maxtokens", "maxoutputtokens", "outputtokenlimit", "maxcompletiontokens"},
 	"multiplier":    {"costmultiplier", "creditsmultiplier", "creditratio", "creditsratio", "multiplier", "credits", "credit", "priceratio", "costratio", "rate", "factor", "weight", "points"},
@@ -102,8 +108,9 @@ func enrichModelInfo(info *pb.ModelInfo, item map[string]json.RawMessage) {
 	if v := anyString(findValue(tree, "name", 2)); v != "" {
 		info.Label = map[string]string{"zh": v, "en": v}
 	}
-	if v := anyString(findValue(tree, "series", 2)); v != "" {
-		info.Series = v
+	// 系列优先按 id 前缀推导（provider 对所有模型常常是同一个品牌名，无法分组）
+	if info.Series == "" {
+		info.Series = seriesOf(info.Id, anyString(findValue(tree, "series", 2)))
 	}
 	if n := anyCount(findValue(tree, "context", 2)); n > 0 {
 		info.ContextWindow = int32(n)
@@ -181,6 +188,118 @@ func modelTags(tree map[string]interface{}, efforts []string) []string {
 		out = append(out, "工具调用")
 	}
 	return out
+}
+
+// enrichFromPricingCatalog 用公开定价目录补齐缺失的倍率/上下文/档位。
+// 官方 /api/models/available 未必给 costMultiplier，定价目录一定有（且不需要凭据）。
+// 失败静默：目录接口不可用时保持 available 的结果。
+func (p *plugin) enrichFromPricingCatalog(ctx context.Context, cred *credential, models []*pb.ModelInfo) {
+	if len(models) == 0 {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", serverBase+pathPricingCatalog, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := p.hc(cred).Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	data, err := envelope(resp)
+	if err != nil {
+		return
+	}
+	var payload struct {
+		TextModels []map[string]json.RawMessage `json:"textModels"`
+	}
+	if json.Unmarshal(data, &payload) != nil || len(payload.TextModels) == 0 {
+		return
+	}
+	byID := make(map[string]map[string]json.RawMessage, len(payload.TextModels))
+	for _, item := range payload.TextModels {
+		if id := rawString(lookup(item, "id")); id != "" {
+			byID[id] = item
+		}
+	}
+	hit := 0
+	for _, m := range models {
+		if item, ok := byID[m.Id]; ok {
+			enrichMissing(m, item)
+			hit++
+		}
+	}
+	if p.host != nil {
+		p.host.Log("info", fmt.Sprintf("定价目录补齐 %d/%d 个模型（倍率/上下文/档位）", hit, len(models)))
+	}
+}
+
+// seriesOf 系列归属：先按 id 前缀推导（参考 workbuddy-manager 的命名约定），
+// 认不出再用上游 provider，最后归「其他」。
+func seriesOf(id, provider string) string {
+	low := strings.ToLower(strings.TrimSpace(id))
+	for _, rule := range []struct {
+		prefixes []string
+		label    string
+	}{
+		{[]string{"glm"}, "智谱 GLM"},
+		{[]string{"deepseek"}, "DeepSeek"},
+		{[]string{"kimi", "moonshot"}, "Kimi"},
+		{[]string{"minimax"}, "MiniMax"},
+		{[]string{"doubao", "seed"}, "豆包"},
+		{[]string{"qwen", "tongyi"}, "通义千问"},
+		{[]string{"hy", "hunyuan"}, "腾讯混元"},
+		{[]string{"claude"}, "Anthropic"},
+		{[]string{"gpt"}, "OpenAI"},
+		{[]string{"auto"}, "自动选择"},
+	} {
+		for _, pre := range rule.prefixes {
+			if strings.HasPrefix(low, pre) {
+				return rule.label
+			}
+		}
+	}
+	if provider != "" {
+		return provider
+	}
+	return "其他"
+}
+
+// enrichMissing 只用条目里的非空字段补齐 target 的空缺（已有值不动）。
+// 用于「公开定价目录」兜底：/api/models/available 缺 costMultiplier 时从这里补。
+func enrichMissing(target *pb.ModelInfo, item map[string]json.RawMessage) {
+	tmp := &pb.ModelInfo{Id: target.Id} // 带上 id：系列按前缀推导要用
+	enrichModelInfo(tmp, item)
+	if target.Label == nil && len(tmp.Label) > 0 {
+		target.Label = tmp.Label
+	}
+	if target.Series == "" || target.Series == "其他" {
+		if tmp.Series != "" {
+			target.Series = tmp.Series
+		}
+	}
+	if target.ContextWindow == 0 {
+		target.ContextWindow = tmp.ContextWindow
+	}
+	if target.MaxOutputTokens == 0 {
+		target.MaxOutputTokens = tmp.MaxOutputTokens
+	}
+	if len(target.ReasoningEfforts) == 0 {
+		target.ReasoningEfforts = tmp.ReasoningEfforts
+	}
+	if target.DefaultReasoningEffort == "" {
+		target.DefaultReasoningEffort = tmp.DefaultReasoningEffort
+	}
+	if target.CreditsMultiplier == 0 {
+		target.CreditsMultiplier = tmp.CreditsMultiplier
+	}
+	if len(target.Tags) == 0 {
+		target.Tags = tmp.Tags
+	}
+	if target.Description == "" {
+		target.Description = tmp.Description
+	}
 }
 
 // ---------- 基础取值 ----------

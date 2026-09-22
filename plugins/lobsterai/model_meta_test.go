@@ -68,6 +68,41 @@ func TestEnrichModelInfoFromOfficialPayload(t *testing.T) {
 	}
 }
 
+// TestEnrichMissingAndSeries 兜底补齐 + 系列推导（pricing-catalog 风格条目不覆盖已有值）。
+func TestEnrichMissingAndSeries(t *testing.T) {
+	info := &pb.ModelInfo{
+		Id:    "deepseek-flash",
+		Label: map[string]string{"en": "DeepSeek-V4.1-Flash"},
+	}
+	item := map[string]json.RawMessage{
+		"modelId":        json.RawMessage(`"deepseek-flash"`),
+		"costMultiplier": json.RawMessage(`0.05`),
+		"contextWindow":  json.RawMessage(`1000000`),
+		"supportsImage":  json.RawMessage(`true`),
+		"provider":       json.RawMessage(`"LobsterAI"`),
+		"thinkingConfig": json.RawMessage(`{"options":[{"level":"off"},{"level":"high"},{"level":"max"}],"defaultLevel":"high"}`),
+	}
+	enrichMissing(info, item)
+	if info.CreditsMultiplier != 0.05 {
+		t.Errorf("倍率未补齐：%v", info.CreditsMultiplier)
+	}
+	if info.ContextWindow != 1000000 {
+		t.Errorf("上下文未补齐：%v", info.ContextWindow)
+	}
+	if info.DefaultReasoningEffort != "high" || len(info.ReasoningEfforts) != 3 {
+		t.Errorf("档位未补齐：%v default=%q", info.ReasoningEfforts, info.DefaultReasoningEffort)
+	}
+	if info.Label["en"] != "DeepSeek-V4.1-Flash" {
+		t.Errorf("已有显示名被覆盖：%+v", info.Label)
+	}
+	if info.Series != "DeepSeek" {
+		t.Errorf("系列应按 id 前缀推导为 DeepSeek：%q", info.Series)
+	}
+	if len(info.Tags) == 0 {
+		t.Errorf("能力标签未推导：%v", info.Tags)
+	}
+}
+
 func TestAnyCountAndFloat(t *testing.T) {
 	cases := []struct {
 		in   interface{}

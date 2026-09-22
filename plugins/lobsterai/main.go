@@ -1118,6 +1118,8 @@ func (p *plugin) ListModels(ctx context.Context, credBlob *pb.CredentialBlob) (*
 		}
 		models = append(models, info)
 	}
+	// 兜底：用公开定价目录补倍率/上下文/推理档位（available 缺这些字段时）
+	p.enrichFromPricingCatalog(ctx, cred, models)
 	return &pb.ModelList{Models: models}, nil
 }
 
