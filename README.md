@@ -1,11 +1,13 @@
 # ClawProxyHubPlugins
 
-[ClawProxyHub](https://github.com/ShadowSmallBaby/ClawProxyHub) 的官方插件仓库：每个子目录一个插件，合入 main 后由 CI 构建、发布 Release 并更新市场索引，核心的「插件市场」默认从本仓库安装。
+[ClawProxyHub-Next](https://github.com/Sndeok/ClawProxyHub-Next) 的插件仓库：每个子目录一个插件，合入 main 后由 CI 构建、发布 Release 并更新市场索引，核心的「插件市场」默认从本仓库安装。
 
 | 插件 | 说明 |
 | --- | --- |
 | `lobsterai` | 网易有道 LobsterAI：浏览器 OAuth / 凭据文件登录，每日签到 |
 | `workbuddy` | 腾讯 WorkBuddy / CodeBuddy：手机验证码 / 浏览器授权 / 凭据文件登录，签到、盲盒、旅行、成长任务 |
+| `qoder` | Qoder（qoder.sh / qoder.com.cn）：浏览器设备授权 / PAT / 粘贴 dt- 令牌，额度与每日签到 |
+| `qoderwork` | QoderWork（CN）：浏览器设备授权 / 粘贴 dt- 令牌，额度与每日签到 |
 
 ## 目录约定
 
@@ -15,6 +17,7 @@ plugins/<name>/
 ├── icon.png        # 可选，正方形 PNG 128–256px
 └── main.go         # 入口：sdk.Serve(&plugin{})，Handshake 回报 version 变量
 tools/pack/         # 打包器：交叉编译 + .cphplugin + index.json
+internal/qodersign/ # Qoder 系共享：COSY 签名 / QoderEncoding / 设备指纹 / 嵌套 SSE 解包
 index.json          # 市场索引（CI 生成并回写，勿手改）
 ```
 
@@ -22,19 +25,19 @@ index.json          # 市场索引（CI 生成并回写，勿手改）
 
 ## 开发
 
-SDK 来自核心模块 `github.com/ShadowSmallBaby/ClawProxyHub`（go.mod 固定到某个提交）。要对着本地核心源码开发，用 workspace 覆盖（`go.work` 已忽略，不入库）：
+SDK 来自核心模块 `github.com/Sndeok/ClawProxyHub-Next`（go.mod 固定到某个提交）。要对着本地核心源码开发，用 workspace 覆盖（`go.work` 已忽略，不入库）：
 
 ```bash
 go work init .
-go work edit -replace github.com/ShadowSmallBaby/ClawProxyHub=../ClawProxyHub
+go work edit -replace github.com/Sndeok/ClawProxyHub-Next=../ClawProxyHub-Next
 
 go build ./... && go test ./...
 
 # 编译当前平台并装进核心的插件目录（核心运行中会锁住二进制，先在插件页停止该插件）
-go run ./tools/pack -install ../ClawProxyHub/data/plugins
+go run ./tools/pack -install ../ClawProxyHub-Next/data/plugins
 ```
 
-升级 SDK 版本：`GOWORK=off go get github.com/ShadowSmallBaby/ClawProxyHub@main && GOWORK=off go mod tidy`。
+升级 SDK 版本：`GOWORK=off go get github.com/Sndeok/ClawProxyHub-Next@main && GOWORK=off go mod tidy`。
 
 ## 打包与发布
 

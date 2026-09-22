@@ -1,0 +1,10 @@
+{
+  "name": "qoderwork",
+  "version": "0.1.0",
+  "author": "cph",
+  "label": {
+    "zh": "QoderWork",
+    "en": "QoderWork"
+  },
+  "icon": "icon.png"
+}
