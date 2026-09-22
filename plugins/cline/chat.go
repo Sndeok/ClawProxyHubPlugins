@@ -149,22 +149,33 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		return stream.Send(failedDetail(mapUpstreamStatus(resp.StatusCode, string(raw)), fmt.Sprintf("HTTP %d: %s", resp.StatusCode, clip(string(raw), 300)), detail))
 	}
 
-	if err := stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_MessageStart{
-		MessageStart: &pb.MessageStart{Model: req.Model},
-	}}); err != nil {
-		return err
-	}
-
-	// 统计有效内容：上游免费通道存在「HTTP 200 但全程只有 reasoning、没有 content」的坏响应，
-	// 这里识别后交给核心换号重试（参考实现同样做了内容检测）。
+	// 有效内容统计 + 延迟首发：上游免费通道存在「HTTP 200、全程只有 reasoning、
+	// 没有 content」的坏响应（并发/参数风控）。这时把失败作为**首事件**上报，
+	// 核心才会按 429 暂停该账号并换号重试；若提前发过 MessageStart 就只会报错给客户端。
 	var contentDeltas, toolDeltas int
+	started := false
+	ensureStart := func() {
+		if started {
+			return
+		}
+		started = true
+		_ = stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_MessageStart{
+			MessageStart: &pb.MessageStart{Model: req.Model},
+		}})
+	}
 	emit := func(ev *pb.StreamEvent) {
 		switch ev.Event.(type) {
 		case *pb.StreamEvent_ContentDelta:
 			contentDeltas++
 		case *pb.StreamEvent_ToolCallDelta:
 			toolDeltas++
+		case *pb.StreamEvent_MessageFinish:
+			// 还没见过任何有效内容就收到结束帧 = 上游空响应：先吞掉，交给末尾判定
+			if contentDeltas == 0 && toolDeltas == 0 {
+				return
+			}
 		}
+		ensureStart()
 		_ = stream.Send(ev)
 	}
 	parser := openaiup.NewParser(emit)
@@ -174,12 +185,11 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		parser.Feed(sc.Text())
 	}
 	if err := sc.Err(); err != nil {
-		parser.FinishWithError(502, "上游流中断: "+err.Error())
-		return nil
+		// 已被截断：若还没发过任何内容，可换号重试；否则只能如实上报中断
+		return stream.Send(failed(502, "上游流中断（无有效内容）: "+err.Error()))
 	}
 	if contentDeltas == 0 && toolDeltas == 0 {
-		parser.FinishWithError(502, "上游返回空内容（免费通道并发/参数风控），已交由核心换号重试")
-		return nil
+		return stream.Send(failed(429, "上游返回空内容（免费通道并发/参数风控）：已暂停该账号并换号重试"))
 	}
 	parser.Finish()
 	return nil
