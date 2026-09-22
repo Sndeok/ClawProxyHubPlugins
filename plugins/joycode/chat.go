@@ -65,7 +65,7 @@ func (p *plugin) joyRunChat(ctx context.Context, req *pb.ChatRequest, send func(
 	}
 
 	start := time.Now()
-	resp, rawErr, err := p.joyPostStream(ctx, cred, joyEpChat, body)
+	resp, rawErr, err := p.joyPostStream(ctx, cred, joyEpChat, body, joyConversationHints(req))
 	if err != nil {
 		statusCode := 0
 		if resp != nil {

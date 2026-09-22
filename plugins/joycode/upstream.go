@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Sndeok/ClawProxyHub-Next/sdk"
 	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
@@ -284,6 +285,24 @@ func (p *plugin) requestURL(cred *joyCred, endpoint string) string {
 
 // ---------- 请求头 ----------
 
+// joyConversationHints 从信封 extra 里筛出核心下发的「对话头提示」，其余键（top_p 等）
+// 属于请求体参数，不能混进出站头构造。
+func joyConversationHints(req *pb.ChatRequest) map[string]string {
+	if len(req.Extra) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, k := range []string{sdk.ExtraClientUserAgent, sdk.ExtraFingerprintHeaders} {
+		if v := strings.TrimSpace(req.Extra[k]); v != "" {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // joyBuildUserAgent 按官方指纹拼装 UA（纯函数，便于测试）。
 func joyBuildUserAgent(name, ver string) string {
 	return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -291,7 +310,13 @@ func joyBuildUserAgent(name, ver string) string {
 }
 
 // joyUserAgent 出站 UA；outbound_user_agent 非空时整段覆盖。
-func (p *plugin) joyUserAgent() string {
+func (p *plugin) joyUserAgent(extra map[string]string) string {
+	// 核心下发的对话 UA（路由 UA > 全局网关 UA > 客户端 UA）：优先级最高
+	if extra != nil {
+		if v := strings.TrimSpace(extra[sdk.ExtraClientUserAgent]); v != "" {
+			return v
+		}
+	}
 	if v := strings.TrimSpace(str(p.settings()["outbound_user_agent"])); v != "" {
 		return v
 	}
@@ -299,13 +324,13 @@ func (p *plugin) joyUserAgent() string {
 }
 
 // joyHeaders OpenAI 方言出站头（流式与非流式都用 identity，避免 gzip 缓冲）。
-func (p *plugin) joyHeaders(cred *joyCred, stream bool) http.Header {
+func (p *plugin) joyHeaders(cred *joyCred, stream bool, extra map[string]string) http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json; charset=UTF-8")
 	h.Set("source-type", joySourceType)
 	h.Set("ptKey", cred.PtKey)
 	h.Set("loginType", joyLoginTypeFor(cred, false))
-	h.Set("User-Agent", p.joyUserAgent())
+	h.Set("User-Agent", p.joyUserAgent(extra))
 	h.Set("Accept", "*/*")
 	h.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	if stream {
@@ -313,12 +338,52 @@ func (p *plugin) joyHeaders(cred *joyCred, stream bool) http.Header {
 	} else {
 		h.Set("Accept-Encoding", "gzip, deflate")
 	}
+	p.mergeFingerprintHeaders(h, extra)
 	return h
 }
 
+// adoptFingerprint 是否采用核心下发的客户端指纹头（插件设置 adopt_fingerprint=on）。
+// 默认关闭：JoyCode 上游认的是官方 IDE 指纹，混入 Claude Code / Codex 头未必是好事。
+func (p *plugin) adoptFingerprint() bool {
+	return strings.EqualFold(p.settingStr("adopt_fingerprint", "off"), "on")
+}
+
+// mergeFingerprintHeaders 按开关合并指纹头；关闭或没有指纹头时为空操作。
+func (p *plugin) mergeFingerprintHeaders(h http.Header, extra map[string]string) {
+	if extra == nil || !p.adoptFingerprint() {
+		return
+	}
+	joyMergeFingerprintHeaders(h, strings.TrimSpace(extra[sdk.ExtraFingerprintHeaders]))
+}
+
+// joyMergeFingerprintHeaders 合并指纹头 JSON，只补空位 —— 鉴权头（ptKey/loginType）、
+// 协议头（source-type/content-type/Accept-Encoding）与已选定的 UA 一律不覆盖。
+func joyMergeFingerprintHeaders(h http.Header, raw string) {
+	if raw == "" {
+		return
+	}
+	var fp map[string]string
+	if json.Unmarshal([]byte(raw), &fp) != nil {
+		return
+	}
+	for k, v := range fp {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		switch strings.ToLower(k) {
+		case "user-agent", "ptkey", "logintype", "source-type", "content-type", "accept-encoding":
+			continue
+		}
+		if h.Get(k) == "" {
+			h.Set(k, v)
+		}
+	}
+}
+
 // joyAnthropicHeaders Anthropic 方言出站头（loginType 缺省 PIN_JD_CLOUD）。
-func (p *plugin) joyAnthropicHeaders(cred *joyCred, stream bool) http.Header {
-	h := p.joyHeaders(cred, stream)
+func (p *plugin) joyAnthropicHeaders(cred *joyCred, stream bool, extra map[string]string) http.Header {
+	h := p.joyHeaders(cred, stream, extra)
 	h.Set("Content-Type", "application/json; charset=utf-8")
 	h.Set("loginType", joyLoginTypeFor(cred, true))
 	return h
@@ -361,6 +426,12 @@ func (p *plugin) joyAnthropicEnvelope(cred *joyCred, extra map[string]interface{
 
 // joyPost 非流式请求：返回解析后的 JSON。
 func (p *plugin) joyPost(ctx context.Context, cred *joyCred, endpoint string, extra map[string]interface{}) (map[string]interface{}, error) {
+	return p.joyPostWithHints(ctx, cred, endpoint, extra, nil)
+}
+
+// joyPostWithHints 同 joyPost；hints 额外携带对话头提示（核心下发的 client_user_agent /
+// fingerprint_headers），只有对话请求用得上，userInfo / modelList 传 nil。
+func (p *plugin) joyPostWithHints(ctx context.Context, cred *joyCred, endpoint string, extra map[string]interface{}, hints map[string]string) (map[string]interface{}, error) {
 	payload, err := json.Marshal(p.joyEnvelope(cred, extra))
 	if err != nil {
 		return nil, err
@@ -369,7 +440,7 @@ func (p *plugin) joyPost(ctx context.Context, cred *joyCred, endpoint string, ex
 	if err != nil {
 		return nil, err
 	}
-	req.Header = p.joyHeaders(cred, false)
+	req.Header = p.joyHeaders(cred, false, hints)
 	resp, err := p.httpClient(cred).Do(req)
 	if err != nil {
 		return nil, err
@@ -390,7 +461,7 @@ func (p *plugin) joyPost(ctx context.Context, cred *joyCred, endpoint string, ex
 }
 
 // joyPostStream 流式请求：返回原始响应体（已按需解 gzip）。
-func (p *plugin) joyPostStream(ctx context.Context, cred *joyCred, endpoint string, extra map[string]interface{}) (*http.Response, []byte, error) {
+func (p *plugin) joyPostStream(ctx context.Context, cred *joyCred, endpoint string, extra map[string]interface{}, hints map[string]string) (*http.Response, []byte, error) {
 	payload, err := json.Marshal(p.joyEnvelope(cred, extra))
 	if err != nil {
 		return nil, nil, err
@@ -399,7 +470,7 @@ func (p *plugin) joyPostStream(ctx context.Context, cred *joyCred, endpoint stri
 	if err != nil {
 		return nil, nil, err
 	}
-	req.Header = p.joyHeaders(cred, true)
+	req.Header = p.joyHeaders(cred, true, hints)
 	resp, err := p.httpClient(cred).Do(req)
 	if err != nil {
 		return nil, nil, err

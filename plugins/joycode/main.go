@@ -106,6 +106,13 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 					"description": "JoyCode 官方客户端 UA 没有 CLI 段，此项留空即可，填了也不会进 UA",
 					"default": ""
 				},
+				"adopt_fingerprint": {
+					"type": "string",
+					"title": "采用客户端指纹头",
+					"description": "核心会按入口协议下发 Claude Code / Codex 的指纹头（user-agent / x-app / anthropic-beta / session_id 等）。off = 保持 JoyCode 官方 IDE 指纹（推荐）；on = 合并这些头（仅补空位，不覆盖鉴权与 UA）",
+					"enum": ["off", "on"],
+					"default": "off"
+				},
 				"extra_headers": {
 					"type": "string",
 					"title": "额外请求头",

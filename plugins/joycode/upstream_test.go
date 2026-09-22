@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Sndeok/ClawProxyHub-Next/sdk"
 	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
@@ -93,7 +94,7 @@ func TestJoyEnvelopeFields(t *testing.T) {
 func TestJoyHeaders(t *testing.T) {
 	p := &plugin{}
 	cred := &joyCred{PtKey: "pk-1", UserID: "u-1"}
-	h := p.joyHeaders(cred, true)
+	h := p.joyHeaders(cred, true, nil)
 	if h.Get("ptKey") != "pk-1" {
 		t.Errorf("ptKey 头缺失: %v", h)
 	}
@@ -110,10 +111,10 @@ func TestJoyHeaders(t *testing.T) {
 	if h.Get("Accept-Encoding") != "identity" {
 		t.Errorf("流式 Accept-Encoding 必须是 identity，实际 %s", h.Get("Accept-Encoding"))
 	}
-	if nh := p.joyHeaders(cred, false).Get("Accept-Encoding"); nh != "gzip, deflate" {
+	if nh := p.joyHeaders(cred, false, nil).Get("Accept-Encoding"); nh != "gzip, deflate" {
 		t.Errorf("非流式 Accept-Encoding 不符: %s", nh)
 	}
-	if ah := p.joyAnthropicHeaders(cred, true); ah.Get("loginType") != "PIN_JD_CLOUD" {
+	if ah := p.joyAnthropicHeaders(cred, true, nil); ah.Get("loginType") != "PIN_JD_CLOUD" {
 		t.Errorf("anthropic loginType 不符: %s", ah.Get("loginType"))
 	}
 }
@@ -132,6 +133,80 @@ func TestJoyBuildUserAgent(t *testing.T) {
 	}
 }
 
+// 出站 UA 优先级：核心下发的对话 UA（路由/全局）> 插件出站标识 > 内置拼装。
+func TestJoyUserAgentPriority(t *testing.T) {
+	p := &plugin{}
+	cred := &joyCred{PtKey: "k", UserID: "u"}
+
+	if got := p.joyHeaders(cred, true, nil).Get("User-Agent"); !strings.Contains(got, "JoyCode/"+joyDefaultVersion) {
+		t.Errorf("无 extra 时应回落到内置 UA: %s", got)
+	}
+	extra := map[string]string{sdk.ExtraClientUserAgent: "RouteUA/9.9"}
+	if got := p.joyHeaders(cred, true, extra).Get("User-Agent"); got != "RouteUA/9.9" {
+		t.Errorf("核心下发的对话 UA 未生效: %s", got)
+	}
+}
+
+// 指纹头默认不采用（未配置时 adopt_fingerprint = off）。
+func TestJoyAdoptFingerprintDefaultOff(t *testing.T) {
+	p := &plugin{}
+	if p.adoptFingerprint() {
+		t.Error("默认应为 off")
+	}
+	h := p.joyHeaders(&joyCred{PtKey: "pk", UserID: "u"}, true, map[string]string{
+		sdk.ExtraFingerprintHeaders: `{"x-app":"cli"}`,
+	})
+	if h.Get("x-app") != "" {
+		t.Errorf("默认不应合并指纹头: %v", h)
+	}
+	if !strings.Contains(h.Get("User-Agent"), "JoyCode/") {
+		t.Errorf("默认应保持 JoyCode 官方指纹: %s", h.Get("User-Agent"))
+	}
+}
+
+// 合并规则：只补空位；鉴权头 / 协议头 / UA 不被覆盖；非法 JSON 静默忽略。
+func TestJoyMergeFingerprintHeaders(t *testing.T) {
+	h := http.Header{}
+	h.Set("ptKey", "pk")
+	h.Set("loginType", joyDefaultLoginType)
+	h.Set("User-Agent", "JoyCode/2.7.5")
+	h.Set("source-type", joySourceType)
+	joyMergeFingerprintHeaders(h, `{"user-agent":"claude-cli/9","x-app":"cli","anthropic-beta":"beta-1","ptkey":"HACK","loginType":"HACK","source-type":"HACK","session_id":"s-1"}`)
+
+	if h.Get("x-app") != "cli" || h.Get("anthropic-beta") != "beta-1" || h.Get("session_id") != "s-1" {
+		t.Errorf("指纹头未补入: %v", h)
+	}
+	if h.Get("ptKey") != "pk" || h.Get("loginType") != joyDefaultLoginType || h.Get("source-type") != joySourceType {
+		t.Errorf("鉴权/协议头被覆盖: %v", h)
+	}
+	if h.Get("User-Agent") != "JoyCode/2.7.5" {
+		t.Errorf("UA 不应被指纹头覆盖: %s", h.Get("User-Agent"))
+	}
+
+	joyMergeFingerprintHeaders(h, "{not-json")
+	if h.Get("x-app") != "cli" {
+		t.Error("非法 JSON 不应影响已有头")
+	}
+}
+
+// 对话头提示只带核心下发的两个键，不把 top_p 之类的请求体参数混进出站头。
+func TestJoyConversationHints(t *testing.T) {
+	req := &pb.ChatRequest{Extra: map[string]string{
+		sdk.ExtraClientUserAgent:    "UA/1",
+		sdk.ExtraFingerprintHeaders: `{"x-app":"cli"}`,
+		"top_p":                     "0.5",
+	}}
+	hints := joyConversationHints(req)
+	if hints[sdk.ExtraClientUserAgent] != "UA/1" || hints[sdk.ExtraFingerprintHeaders] == "" {
+		t.Errorf("对话头提示缺失: %v", hints)
+	}
+	if _, has := hints["top_p"]; has {
+		t.Errorf("请求体参数混入头提示: %v", hints)
+	}
+	if joyConversationHints(&pb.ChatRequest{}) != nil {
+		t.Error("无 extra 时应返回 nil")
+	}
+}
 func TestJoyParseCredentialInput(t *testing.T) {
 	t.Run("回调URL", func(t *testing.T) {
 		c, err := parseJoyCredentialInput("http://127.0.0.1:19999/api/oauth-callback?pt_key=AA_hz&login_type=PIN&tenant=JOYCODE&user_id=99")
