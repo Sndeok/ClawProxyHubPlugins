@@ -7,94 +7,87 @@ import (
 	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
-// 上游字段风格照桌面端模型选择器实测：倍率有 "x0.73" / 数字 / creditRatio 等写法，
-// 思考强度有数组与 "低/中/高" 字符串两种形态，上下文可能是 128K 这类带单位文本。
+// 字段照官方客户端 AvailableServerModel / ServerModelMetadata 的真实形态。
 const sampleModelsJSON = `[
-  {"modelId":"kimi-k2.7-code","modelName":"Kimi-K2.7-Code","apiFormat":"openai",
-   "creditRatio":"x0.73","contextWindow":"128K","maxOutputTokens":31000,
-   "reasoningEfforts":["高","最大"],"defaultEffort":"高","series":"Kimi",
-   "tags":["可读图"],"description":"代码专用"},
-  {"modelId":"doubao-seed-2.1-pro","modelName":"Doubao-Seed-2.1-Pro","apiFormat":"anthropic",
-   "multiplier":0.68,"context_length":256000,"max_tokens":32000,
-   "thinking_levels":"低/中/高","capabilities":["多模态"]}
+  {"modelId":"kimi-k2.7-code","modelName":"Kimi-K2.7-Code","provider":"moonshot","apiFormat":"openai",
+   "costMultiplier":0.73,"contextWindow":128000,"maxTokens":31000,
+   "supportsImage":true,"supportsThinking":true,"supportsToolCalling":true,
+   "thinkingConfig":{"options":[{"level":"high","openclawLevel":"high"},{"level":"max","openclawLevel":"xhigh"}],"defaultLevel":"high"},
+   "description":"代码专用","accessible":true},
+  {"modelId":"doubao-seed-2.1-pro","modelName":"Doubao-Seed-2.1-Pro","provider":"bytedance","apiFormat":"anthropic",
+   "costMultiplier":"x0.68","contextWindow":"256K","maxTokens":"1.2m",
+   "supportsThinking":true,"thinkingConfig":{"options":[{"level":"low"},{"level":"medium"},{"level":"high"}],"defaultLevel":"medium"}}
 ]`
 
-func TestEnrichModelInfoFromUpstreamPayload(t *testing.T) {
+func TestEnrichModelInfoFromOfficialPayload(t *testing.T) {
 	var items []map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(sampleModelsJSON), &items); err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("样例应有 2 条，got %d", len(items))
-	}
-
 	first := &pb.ModelInfo{}
 	enrichModelInfo(first, items[0])
 	if first.Label["en"] != "Kimi-K2.7-Code" {
 		t.Errorf("显示名未映射：%+v", first.Label)
 	}
 	if first.CreditsMultiplier != 0.73 {
-		t.Errorf("倍率 x0.73 未映射：%v", first.CreditsMultiplier)
+		t.Errorf("costMultiplier 未映射：%v", first.CreditsMultiplier)
 	}
 	if first.ContextWindow != 128000 {
-		t.Errorf("上下文 128K 未映射：%v", first.ContextWindow)
+		t.Errorf("contextWindow 未映射：%v", first.ContextWindow)
 	}
 	if first.MaxOutputTokens != 31000 {
-		t.Errorf("最大输出未映射：%v", first.MaxOutputTokens)
+		t.Errorf("maxTokens 未映射：%v", first.MaxOutputTokens)
 	}
-	if len(first.ReasoningEfforts) != 2 || first.ReasoningEfforts[1] != "最大" {
-		t.Errorf("思考档位未映射：%v", first.ReasoningEfforts)
+	if first.Series != "moonshot" {
+		t.Errorf("provider 未映射为系列：%q", first.Series)
 	}
-	if first.DefaultReasoningEffort != "高" {
-		t.Errorf("默认档位未映射：%q", first.DefaultReasoningEffort)
+	if len(first.ReasoningEfforts) != 2 || first.ReasoningEfforts[1] != "max" {
+		t.Errorf("thinkingConfig.options 未映射：%v", first.ReasoningEfforts)
 	}
-	if first.Series != "Kimi" {
-		t.Errorf("系列未映射：%q", first.Series)
+	if first.DefaultReasoningEffort != "high" {
+		t.Errorf("defaultLevel 未映射：%q", first.DefaultReasoningEffort)
 	}
-	if len(first.Tags) == 0 || first.Description == "" {
-		t.Errorf("标签/说明未映射：tags=%v desc=%q", first.Tags, first.Description)
+	if len(first.Tags) < 3 {
+		t.Errorf("能力标签未推导：%v", first.Tags)
 	}
 
-	// 第二组：数字倍率 + 下划线 key + 字符串档位
+	// 第二组：倍率带 x 前缀、上下文/输出带单位、档位在嵌套里
 	second := &pb.ModelInfo{}
 	enrichModelInfo(second, items[1])
 	if second.CreditsMultiplier != 0.68 {
-		t.Errorf("数字倍率未映射：%v", second.CreditsMultiplier)
+		t.Errorf("\"x0.68\" 未解析：%v", second.CreditsMultiplier)
 	}
 	if second.ContextWindow != 256000 {
-		t.Errorf("context_length 未映射：%v", second.ContextWindow)
+		t.Errorf("\"256K\" 未解析：%v", second.ContextWindow)
 	}
-	if second.MaxOutputTokens != 32000 {
-		t.Errorf("max_tokens 未映射：%v", second.MaxOutputTokens)
+	if second.MaxOutputTokens != 1200000 {
+		t.Errorf("\"1.2m\" 未解析：%v", second.MaxOutputTokens)
 	}
-	if len(second.ReasoningEfforts) != 3 {
-		t.Errorf("字符串档位未拆分：%v", second.ReasoningEfforts)
-	}
-	if len(second.Tags) == 0 {
-		t.Errorf("capabilities 未当标签：%v", second.Tags)
+	if len(second.ReasoningEfforts) != 3 || second.DefaultReasoningEffort != "medium" {
+		t.Errorf("嵌套档位未映射：%v default=%q", second.ReasoningEfforts, second.DefaultReasoningEffort)
 	}
 }
 
-func TestRawCountAndFloat(t *testing.T) {
+func TestAnyCountAndFloat(t *testing.T) {
 	cases := []struct {
-		in   string
+		in   interface{}
 		want int64
 	}{
-		{"128000", 128000},
+		{float64(128000), 128000},
 		{"128K", 128000},
 		{"1.2m", 1200000},
 		{"128,000", 128000},
 		{"", 0},
 	}
 	for _, c := range cases {
-		if got := rawCount(json.RawMessage(c.in)); got != c.want {
-			t.Errorf("rawCount(%q) = %d, want %d", c.in, got, c.want)
+		if got := anyCount(c.in); got != c.want {
+			t.Errorf("anyCount(%v) = %d, want %d", c.in, got, c.want)
 		}
 	}
-	if got := rawFloat(json.RawMessage(`"x0.73"`)); got != 0.73 {
-		t.Errorf("rawFloat(x0.73) = %v", got)
+	if got := anyFloat("x0.73"); got != 0.73 {
+		t.Errorf("anyFloat(x0.73) = %v", got)
 	}
-	if got := rawFloat(json.RawMessage(`0.1`)); got != 0.1 {
-		t.Errorf("rawFloat(0.1) = %v", got)
+	if got := anyFloat(0.1); got != 0.1 {
+		t.Errorf("anyFloat(0.1) = %v", got)
 	}
 }

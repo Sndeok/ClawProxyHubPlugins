@@ -1089,6 +1089,13 @@ func (p *plugin) ListModels(ctx context.Context, credBlob *pb.CredentialBlob) (*
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
+	// 诊断：把第一条原始条目打到核心日志（截断），
+	// 万一上游又改字段名，docker logs | grep 模型目录原始条目 就能看到真实结构。
+	if p.host != nil && len(raw) > 0 {
+		if dump, err := json.Marshal(raw[0]); err == nil {
+			p.host.Log("info", "模型目录原始条目: "+truncate(string(dump), 600))
+		}
+	}
 	var models []*pb.ModelInfo
 	for _, item := range raw {
 		modelID := rawString(lookup(item, "id"))

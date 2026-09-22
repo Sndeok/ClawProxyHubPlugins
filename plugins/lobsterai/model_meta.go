@@ -1,9 +1,17 @@
-// model_meta.go — 模型选型元数据：把上游 /api/models/available 的富字段映射到信封。
+// model_meta.go — 模型选型元数据：把上游 /api/models/available 的字段映射到信封。
 //
-// 桌面端模型选择器会展示「积分倍率 / 思考强度 / 上下文」，这些字段上游接口是带回来的，
-// 但各家（以及同一家的不同版本）命名不统一：creditRatio、multiplier、credits… 都出现过。
-// 所以这里做**容错映射**：按归一化后的 key 比对一组别名，能取到就填，取不到留空
-// （模型中心显示为 -），绝不猜值、不写死数据。
+// 字段名以官方客户端 src/main/main.ts 的 AvailableServerModel 类型为准：
+//
+//	modelId / modelName / provider / apiFormat
+//	costMultiplier   —— 积分倍率（x0.73）
+//	contextWindow    —— 上下文窗口
+//	maxTokens        —— 单次最大输出
+//	thinkingConfig   —— { options:[{level,openclawLevel}], defaultLevel }
+//	supportsImage / supportsVideo / supportsThinking / supportsToolCalling
+//	description / moreModel / accessible / restrictionHint
+//
+// 仍然做**容错**：按归一化 key 的别名表比对，并支持嵌套（thinkingConfig 在第二层），
+// 取不到就留空（模型中心显示 -），绝不猜值。
 package main
 
 import (
@@ -28,30 +36,58 @@ func normKey(s string) string {
 	return b.String()
 }
 
-// aliasGroups 每类元数据的候选字段名（按归一化后比对，前者优先）。
+// aliasGroups 每类元数据的候选字段名（归一化后比对，数组顺序即优先级）。
 var aliasGroups = map[string][]string{
-	"id":            {"modelid", "id", "model", "name", "key"},
+	"id":            {"modelid", "id", "model", "key"},
 	"apiformat":     {"apiformat", "format", "protocol", "dialect"},
-	"name":          {"modelname", "displayname", "name", "label", "title", "modelid"},
-	"series":        {"series", "category", "family", "vendor", "provider", "brand", "seriesname"},
+	"name":          {"modelname", "displayname", "name", "label", "title"},
+	"series":        {"provider", "series", "vendor", "family", "category", "brand"},
 	"context":       {"contextwindow", "contextlength", "maxinputtokens", "maxcontexttokens", "contextsize", "inputtokenlimit", "context"},
-	"maxoutput":     {"maxoutputtokens", "maxtokens", "outputtokenlimit", "maxcompletiontokens", "maxoutputtokenslimit"},
-	"multiplier":    {"creditsmultiplier", "creditratio", "creditsratio", "multiplier", "credits", "credit", "priceratio", "costratio", "rate", "factor", "weight", "points"},
-	"efforts":       {"reasoningefforts", "supportedefforts", "thinkinglevels", "reasoninglevels", "thoughtlevels", "effortlevels", "efforts", "levels", "thinkingeffort"},
-	"defaulteffort": {"defaultreasoningeffort", "defaulteffort", "defaultlevel", "defaultthinking", "defaultthinkinglevel"},
+	"maxoutput":     {"maxtokens", "maxoutputtokens", "outputtokenlimit", "maxcompletiontokens"},
+	"multiplier":    {"costmultiplier", "creditsmultiplier", "creditratio", "creditsratio", "multiplier", "credits", "credit", "priceratio", "costratio", "rate", "factor", "weight", "points"},
+	"efforts":       {"efforts", "supportedefforts", "reasoninglevels", "thinkinglevels", "thoughtlevels", "effortlevels", "levels", "options"},
+	"defaulteffort": {"defaultlevel", "defaultreasoninglevel", "defaulteffort", "defaultthinking", "defaultthinkinglevel"},
 	"tags":          {"tags", "capabilities", "features", "labels", "badges"},
-	"description":   {"description", "descriptionZh", "desc", "intro", "remark"},
+	// 布尔能力（官方字段名 supportsImage / supportsVideo / supportsThinking / supportsToolCalling）
+	"supportsimage":       {"supportsimage", "supportimage"},
+	"supportsvideo":       {"supportsvideo", "supportvideo"},
+	"supportsthinking":    {"supportsthinking", "supportreasoning"},
+	"supportstoolcalling": {"supportstoolcalling", "supportstools", "supporttollcalling"},
+	"description":         {"description", "descriptionzh", "desc", "intro", "remark"},
 }
 
-// lookup 按别名组取原始 JSON 值（大小写 / 下划线不敏感）。
-func lookup(item map[string]json.RawMessage, group string) json.RawMessage {
-	flat := make(map[string]json.RawMessage, len(item))
-	for k, v := range item {
-		flat[normKey(k)] = v
+// findValue 递归查别名：本层按别名优先级命中即返回，未命中再按 key 排序下钻（深度上限）。
+// 这样既能取顶层 costMultiplier，也能取 thinkingConfig.options[].level 这类嵌套值。
+func findValue(node interface{}, group string, depth int) interface{} {
+	if depth < 0 || node == nil {
+		return nil
 	}
-	for _, alias := range aliasGroups[group] {
-		if v, ok := flat[normKey(alias)]; ok && len(v) > 0 && string(v) != "null" {
-			return v
+	switch t := node.(type) {
+	case map[string]interface{}:
+		idx := make(map[string]interface{}, len(t))
+		for k, v := range t {
+			idx[normKey(k)] = v
+		}
+		for _, alias := range aliasGroups[group] {
+			if v, ok := idx[normKey(alias)]; ok && v != nil {
+				return v
+			}
+		}
+		keys := make([]string, 0, len(idx))
+		for k := range idx {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if got := findValue(idx[k], group, depth-1); got != nil {
+				return got
+			}
+		}
+	case []interface{}:
+		for _, v := range t {
+			if got := findValue(v, group, depth-1); got != nil {
+				return got
+			}
 		}
 	}
 	return nil
@@ -59,66 +95,124 @@ func lookup(item map[string]json.RawMessage, group string) json.RawMessage {
 
 // enrichModelInfo 用上游条目补全选型元数据（容错，缺字段就跳过）。
 func enrichModelInfo(info *pb.ModelInfo, item map[string]json.RawMessage) {
-	if v := rawString(lookup(item, "name")); v != "" {
+	tree := map[string]interface{}{}
+	if raw, err := json.Marshal(item); err == nil {
+		_ = json.Unmarshal(raw, &tree)
+	}
+	if v := anyString(findValue(tree, "name", 2)); v != "" {
 		info.Label = map[string]string{"zh": v, "en": v}
 	}
-	if v := rawString(lookup(item, "series")); v != "" {
+	if v := anyString(findValue(tree, "series", 2)); v != "" {
 		info.Series = v
 	}
-	if n := rawCount(lookup(item, "context")); n > 0 {
+	if n := anyCount(findValue(tree, "context", 2)); n > 0 {
 		info.ContextWindow = int32(n)
 	}
-	if n := rawCount(lookup(item, "maxoutput")); n > 0 {
+	if n := anyCount(findValue(tree, "maxoutput", 2)); n > 0 {
 		info.MaxOutputTokens = int32(n)
 	}
-	if f := rawFloat(lookup(item, "multiplier")); f > 0 {
+	if f := anyFloat(findValue(tree, "multiplier", 2)); f > 0 {
 		info.CreditsMultiplier = f
 	}
-	if list := rawStrings(lookup(item, "efforts")); len(list) > 0 {
+	if list := anyLevels(findValue(tree, "efforts", 3)); len(list) > 0 {
 		info.ReasoningEfforts = list
 	}
-	if v := rawString(lookup(item, "defaulteffort")); v != "" {
+	if v := anyString(findValue(tree, "defaulteffort", 3)); v != "" {
 		info.DefaultReasoningEffort = v
 	}
-	if list := rawStrings(lookup(item, "tags")); len(list) > 0 {
-		info.Tags = list
-	}
-	if v := rawString(lookup(item, "description")); v != "" {
+	if v := anyString(findValue(tree, "description", 2)); v != "" {
 		info.Description = v
 	}
+	info.Tags = modelTags(tree, info.ReasoningEfforts)
 }
 
-// rawString 取字符串（数字也转成文本；对象/数组返回空）。
-func rawString(v json.RawMessage) string {
-	if len(v) == 0 {
-		return ""
+// anyLevels 把各种形态的「档位」归一成字符串数组：
+//
+//	["low","high"] / "低/中/高" / [{"level":"high"},{"level":"max"}]
+func anyLevels(v interface{}) []string {
+	switch t := v.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			switch e := item.(type) {
+			case string:
+				if s := strings.TrimSpace(e); s != "" {
+					out = append(out, s)
+				}
+			case map[string]interface{}:
+				// 官方形态：{level:"high", openclawLevel:"high"}
+				if s := anyString(e["level"]); s != "" {
+					out = append(out, s)
+				}
+			}
+		}
+		return out
+	case string:
+		var out []string
+		for _, part := range strings.FieldsFunc(t, func(r rune) bool {
+			return r == ',' || r == '/' || r == '|' || r == '、' || r == ';'
+		}) {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+		return out
 	}
-	var s string
-	if json.Unmarshal(v, &s) == nil {
-		return strings.TrimSpace(s)
+	return nil
+}
+
+// modelTags 能力标签：上游 tags + 布尔能力推导（供模型中心筛选）。
+func modelTags(tree map[string]interface{}, efforts []string) []string {
+	out := []string{}
+	if raw := findValue(tree, "tags", 2); raw != nil {
+		if list := anyLevels(raw); len(list) > 0 {
+			out = append(out, list...)
+		} else if s := anyString(raw); s != "" {
+			out = append(out, s)
+		}
 	}
-	var n json.Number
-	if json.Unmarshal(v, &n) == nil {
-		return n.String()
+	if anyBool(findValue(tree, "supportsimage", 2)) || anyBool(findValue(tree, "supportsvideo", 2)) {
+		out = append(out, "多模态")
 	}
-	// 非法 JSON（裸文本，如 128K）：原样当字符串用，上游偶尔不引号
-	t := strings.TrimSpace(string(v))
-	if t != "" && !strings.HasPrefix(t, "{") && !strings.HasPrefix(t, "[") {
-		return t
+	if anyBool(findValue(tree, "supportsthinking", 2)) || len(efforts) > 0 {
+		out = append(out, "支持推理")
+	}
+	if anyBool(findValue(tree, "supportstoolcalling", 2)) {
+		out = append(out, "工具调用")
+	}
+	return out
+}
+
+// ---------- 基础取值 ----------
+
+func anyString(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case json.Number:
+		return t.String()
 	}
 	return ""
 }
 
-// rawFloat 取数值：支持 0.73、"x0.73"、"×0.73"、"0.73x" 等写法；取不到返回 0。
-func rawFloat(v json.RawMessage) float64 {
-	if len(v) == 0 {
-		return 0
+func anyBool(v interface{}) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return strings.EqualFold(strings.TrimSpace(t), "true")
 	}
-	var f float64
-	if json.Unmarshal(v, &f) == nil {
+	return false
+}
+
+// anyFloat 数值：支持 0.73 / "x0.73" / "×0.73" / "0.73 倍"。
+func anyFloat(v interface{}) float64 {
+	if f, ok := v.(float64); ok {
 		return f
 	}
-	s := rawString(v)
+	s := anyString(v)
 	if s == "" {
 		return 0
 	}
@@ -130,16 +224,12 @@ func rawFloat(v json.RawMessage) float64 {
 	return f
 }
 
-// rawCount 取 token 数：支持数字与 "128K" / "1.2m" / "128,000" 等写法。
-func rawCount(v json.RawMessage) int64 {
-	if len(v) == 0 {
-		return 0
+// anyCount token 数：支持 128000 / "128K" / "1.2m" / "128,000"。
+func anyCount(v interface{}) int64 {
+	if f, ok := v.(float64); ok {
+		return int64(f)
 	}
-	var n int64
-	if json.Unmarshal(v, &n) == nil {
-		return n
-	}
-	s := strings.NewReplacer(",", "", "_", "", " ", "").Replace(rawString(v))
+	s := strings.NewReplacer(",", "", "_", "", " ", "").Replace(anyString(v))
 	if s == "" {
 		return 0
 	}
@@ -157,33 +247,38 @@ func rawCount(v json.RawMessage) int64 {
 	return int64(f * mult)
 }
 
-// rawStrings 取字符串数组：数组取元素；字符串按 / , 、 拆分；数字转文本。
-func rawStrings(v json.RawMessage) []string {
+// ---------- 兼容入口（ListModels 里用） ----------
+
+// lookup 按别名组取原始 JSON 值（顶层，保留给 id / apiFormat 这种必需字段）。
+func lookup(item map[string]json.RawMessage, group string) json.RawMessage {
+	flat := make(map[string]json.RawMessage, len(item))
+	for k, v := range item {
+		flat[normKey(k)] = v
+	}
+	for _, alias := range aliasGroups[group] {
+		if v, ok := flat[normKey(alias)]; ok && len(v) > 0 && string(v) != "null" {
+			return v
+		}
+	}
+	return nil
+}
+
+// rawString 取字符串（数字转文本；非法 JSON 的裸文本原样用）。
+func rawString(v json.RawMessage) string {
 	if len(v) == 0 {
-		return nil
+		return ""
 	}
-	var list []json.RawMessage
-	if json.Unmarshal(v, &list) == nil {
-		out := make([]string, 0, len(list))
-		for _, item := range list {
-			if s := rawString(item); s != "" {
-				out = append(out, s)
-			}
-		}
-		return out
+	var s string
+	if json.Unmarshal(v, &s) == nil {
+		return strings.TrimSpace(s)
 	}
-	s := rawString(v)
-	if s == "" {
-		return nil
+	var n json.Number
+	if json.Unmarshal(v, &n) == nil {
+		return n.String()
 	}
-	var out []string
-	for _, part := range strings.FieldsFunc(s, func(r rune) bool {
-		return r == ',' || r == '/' || r == '|' || r == '、' || r == ';'
-	}) {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
+	t := strings.TrimSpace(string(v))
+	if t != "" && !strings.HasPrefix(t, "{") && !strings.HasPrefix(t, "[") {
+		return t
 	}
-	sort.Strings(out)
-	return out
+	return ""
 }
