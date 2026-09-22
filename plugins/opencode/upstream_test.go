@@ -238,9 +238,21 @@ func TestLiveAnonFreeLane(t *testing.T) {
 	}
 	// 读前几帧确认真的有内容增量
 	sc := newBufScanner(resp.Body)
+	var sawFinish bool
 	parser := openaiup.NewParser(func(ev *pb.StreamEvent) {
-		if d, ok := ev.Event.(*pb.StreamEvent_ContentDelta); ok && d.ContentDelta.Text != "" {
-			t.Logf("收到内容增量: %q", d.ContentDelta.Text)
+		switch e := ev.Event.(type) {
+		case *pb.StreamEvent_ContentDelta:
+			if e.ContentDelta.Text != "" {
+				t.Logf("收到内容增量: %q", e.ContentDelta.Text)
+			}
+		case *pb.StreamEvent_MessageFinish:
+			sawFinish = true
+			if e.MessageFinish.Usage != nil {
+				t.Logf("收到用量: in=%d out=%d cached=%d",
+					e.MessageFinish.Usage.InputTokens, e.MessageFinish.Usage.OutputTokens, e.MessageFinish.Usage.CachedTokens)
+			} else {
+				t.Log("结束帧没有 usage")
+			}
 		}
 	})
 	lines := 0
@@ -250,6 +262,9 @@ func TestLiveAnonFreeLane(t *testing.T) {
 	}
 	if lines == 0 {
 		t.Fatal("匿名通道没有返回任何帧")
+	}
+	if !sawFinish {
+		t.Error("上游流结束但没有产生 MessageFinish（用量/结束原因会丢）")
 	}
 }
 
