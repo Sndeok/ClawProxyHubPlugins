@@ -1,15 +1,15 @@
 [
   {
     "name": "cline",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "author": "cph",
     "label": {
       "en": "Cline",
       "zh": "Cline"
     },
     "published_at": "2026-09-22",
-    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/cline-v0.1.0/cline-0.1.0.cphplugin",
-    "sha256": "8b055767cac6c244d7fdac84407b713d4a8f11019e92b91e78503e0331b90dbf"
+    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/cline-v0.1.1/cline-0.1.1.cphplugin",
+    "sha256": "31aacc3cf502f7636b8fa8278766dd129a0aab288355e5dd210760daa7baebb3"
   },
   {
     "name": "lobsterai",
