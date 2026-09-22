@@ -19,12 +19,13 @@ import (
 )
 
 const (
-	clineChatPath     = "/chat/completions"
-	clineModelsPath   = "/models"
-	clineFreeListPath = "/ai/cline/recommended-models"
-	defaultClientVer  = "3.0.47"
-	defaultMinGapMs   = 800
-	defaultEffort     = "high"
+	clineChatPath       = "/chat/completions"
+	clineModelsPath     = "/models"
+	clineFreeListPath   = "/ai/cline/recommended-models"
+	clinePassModelsPath = "/cline-pass/models" // 账号可用的 ClinePass 模型（需 accessToken）
+	defaultClientVer    = "3.0.47"
+	defaultMinGapMs     = 800
+	defaultEffort       = "high"
 )
 
 // ---------- HTTP ----------
@@ -295,6 +296,79 @@ func fetchRecommended(ctx context.Context, client *http.Client) (*clineCatalog, 
 		return nil, err
 	}
 	return &out, nil
+}
+
+// fetchClinePassModels 拉「当前账号可用的 ClinePass 模型」——Cline 客户端第二个 provider
+// （ClinePass）的清单来源，包含 Kimi K3 (free) 这类免费档。必须带账号 accessToken：
+// 未登录 / 无资格时上游返回 401，此时调用方退回官方 recommended-models 的 clinePass 组。
+func (p *plugin) fetchClinePassModels(ctx context.Context, client *http.Client, cred *clineCred) ([]recommendedModel, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", clineAPIBase+clinePassModelsPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range p.clineHeaders(cred, "") {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("ClinePass 模型目录 HTTP %d: %s", resp.StatusCode, clip(string(body), 200))
+	}
+	return parseModelList(body)
+}
+
+// parseModelList 容错解析上游模型清单：
+// {data:[...]} / {models:[...]} / {items:[...]} / [{...}] / ["id", ...] 都能吃。
+func parseModelList(body []byte) ([]recommendedModel, error) {
+	var wrapper struct {
+		Data   []recommendedModel `json:"data"`
+		Models []recommendedModel `json:"models"`
+		Items  []recommendedModel `json:"items"`
+	}
+	if json.Unmarshal(body, &wrapper) == nil {
+		for _, list := range [][]recommendedModel{wrapper.Data, wrapper.Models, wrapper.Items} {
+			if len(list) > 0 {
+				return list, nil
+			}
+		}
+	}
+	var direct []recommendedModel
+	if json.Unmarshal(body, &direct) == nil && len(direct) > 0 {
+		return direct, nil
+	}
+	var ids []string
+	if json.Unmarshal(body, &ids) == nil && len(ids) > 0 {
+		out := make([]recommendedModel, 0, len(ids))
+		for _, id := range ids {
+			if id = strings.TrimSpace(id); id != "" {
+				out = append(out, recommendedModel{ID: id})
+			}
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+	}
+	// 字段名不确定时兜底：从宽松 map 里挑第一个像 id 的键
+	var loose []map[string]interface{}
+	if json.Unmarshal(body, &loose) == nil {
+		out := make([]recommendedModel, 0, len(loose))
+		for _, m := range loose {
+			for _, k := range []string{"id", "model_id", "modelId", "model", "slug", "key", "name"} {
+				if s := strings.TrimSpace(str(m[k])); s != "" {
+					out = append(out, recommendedModel{ID: s, Name: str(m["name"]), Description: str(m["description"])})
+					break
+				}
+			}
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("ClinePass 模型目录结构未识别（前 200 字：%s）", clip(string(body), 200))
 }
 
 // shortModelName 取模型 id 的短名：`moonshotai/kimi-k3` → `kimi-k3`、

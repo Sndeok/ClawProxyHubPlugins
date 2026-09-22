@@ -44,18 +44,26 @@ func TestShortModelNameAndFreeAlias(t *testing.T) {
 
 // 目录汇总：四个通道 + 免费通道别名都要出现在对外模型列表里。
 // 回归用户报告的问题：客户端里看得到 kimi-k3，插件侧却没有。
+// 目录汇总：Cline 客户端的两个 provider 通道都要出现在对外模型列表里。
+// 回归用户报告的问题：客户端里看得到 kimi-k3，插件侧却没有；
+// ClinePass 下的清单以账号级 /cline-pass/models 为准。
 func TestListModelsExposesAllChannels(t *testing.T) {
 	withClineUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case clineFreeListPath:
-			// 与线上一致的形状：kimi-k3 只出现在 recommended / clinePass / clineCloud
 			fmt.Fprint(w, `{
 			  "recommended":[{"id":"moonshotai/kimi-k3","name":"kimi-k3","description":"flagship","tags":["NEW"]}],
 			  "free":[{"id":"cline-free/deepseek-v4.1-flash","name":"Deepseek-v4.1-Flash","description":"fast","tags":[]}],
 			  "clinePass":[{"id":"cline-pass/kimi-k3","name":"cline-pass/kimi-k3","description":"","tags":[]}],
 			  "clineCloud":[{"id":"cline-cloud/kimi-k3","name":"cline-cloud/kimi-k3","description":"","tags":[]}]
 			}`)
+		case clinePassModelsPath:
+			// 账号可用的 ClinePass 清单：客户端 ClinePass provider 里能选到的就这些
+			fmt.Fprint(w, `{"data":[
+			  {"id":"cline-free/kimi-k3","name":"Kimi K3 (free)","description":"free tier"},
+			  {"id":"cline-pass/glm-5.3","name":"GLM-5.3 (ClinePass)","description":"subscription"}
+			]}`)
 		case clineModelsPath:
 			fmt.Fprint(w, `{"data":[{"id":"poolside/laguna-s-2.1:free"}]}`)
 		default:
@@ -75,11 +83,11 @@ func TestListModelsExposesAllChannels(t *testing.T) {
 		byID[m.Id] = m
 	}
 	wants := []string{
-		"moonshotai/kimi-k3",             // recommended 原样暴露
-		"cline-free/kimi-k3",             // 免费通道别名（用户实测可用）
-		"cline-pass/kimi-k3",             // 通行证
-		"cline-cloud/kimi-k3",            // 云通道
-		"cline-free/deepseek-v4.1-flash", // free 清单
+		"moonshotai/kimi-k3",             // recommended 原样暴露（Cline Usage-Billing）
+		"cline-free/deepseek-v4.1-flash", // 官方 free 组
+		"cline-free/kimi-k3",             // ClinePass 账号清单里的免费档
+		"cline-pass/glm-5.3",             // ClinePass 账号清单里的订阅款
+		"cline-cloud/kimi-k3",            // 云通道（客户端已无该 provider，保留兼容）
 		"poolside/laguna-s-2.1:free",     // 公开目录 :free
 	}
 	for _, id := range wants {
@@ -87,11 +95,22 @@ func TestListModelsExposesAllChannels(t *testing.T) {
 			t.Errorf("模型列表缺少 %s（共 %d 个）", id, len(ml.Models))
 		}
 	}
-	if m := byID["cline-free/kimi-k3"]; m != nil && !strings.Contains(strings.Join(m.Tags, ","), "免费通道") {
-		t.Errorf("cline-free/kimi-k3 应带「免费通道」标签，实际 %v", m.Tags)
+	if m := byID["cline-free/kimi-k3"]; m != nil {
+		tags := strings.Join(m.Tags, ",")
+		if !strings.Contains(tags, "ClinePass") || !strings.Contains(tags, "免费档") {
+			t.Errorf("cline-free/kimi-k3 应带 ClinePass/免费档 标签，实际 %v", m.Tags)
+		}
+		if m.Label["zh"] != "Kimi K3 (free)" {
+			t.Errorf("账号清单里的展示名应透传：%+v", m.Label)
+		}
 	}
-	if m := byID["moonshotai/kimi-k3"]; m != nil && m.Description != "flagship" {
-		t.Errorf("recommended 描述未透传: %+v", m)
+	if m := byID["moonshotai/kimi-k3"]; m != nil {
+		if m.Description != "flagship" {
+			t.Errorf("recommended 描述未透传: %+v", m)
+		}
+		if !strings.Contains(strings.Join(m.Tags, ","), "Cline Usage-Billing") {
+			t.Errorf("recommended 应标为 Cline Usage-Billing，实际 %v", m.Tags)
+		}
 	}
 }
 
@@ -127,6 +146,10 @@ func TestListModelsDoesNotInventFreeAliases(t *testing.T) {
 			  "clinePass":[{"id":"cline-pass/qwen3.8-max","name":"cline-pass/qwen3.8-max"}],
 			  "clineCloud":[]
 			}`)
+		case clinePassModelsPath:
+			// 账号级清单拿不到（未登录/无资格）→ 走官方 clinePass 组 + 实测可用别名的兜底
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":"Unauthorized"}`)
 		case clineModelsPath:
 			fmt.Fprint(w, `{"data":[]}`)
 		}

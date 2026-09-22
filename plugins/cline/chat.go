@@ -40,6 +40,13 @@ var freeWhitelist = map[string]bool{
 // cline-free/gpt-6-astra、cline-free/grok-4.7、cline-free/qwen3.8-max、
 // cline-free/mimo-v2.5 等实测一律 404 {"error":"model not found"}。
 // 别名只能按这份名单生成，不能从 recommended / clinePass 整段推导。
+// Cline 客户端的两个 provider 名称（照抄客户端 UI，插件里标签保持一致）
+const (
+	laneUsage = "Cline Usage-Billing" // 按量计费：公开目录 + 官方推荐
+	lanePass  = "ClinePass"           // 订阅通道（含免费档）
+	laneCloud = "Cline 云通道"           // 客户端已无该 provider，保留兼容
+)
+
 var freeLaneVerifiedShorts = map[string]bool{
 	"kimi-k3": true, // moonshotai/kimi-k3 的免费通道形式，实测可用
 }
@@ -79,34 +86,47 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 		seen[id] = true
 		list = append(list, entry{id: id, name: orDefault(name, id), desc: desc, tags: tags})
 	}
+	// Cline 客户端只有两个 provider：Cline Usage-Billing（按量计费）与 ClinePass（订阅+免费档）。
+	// 模型列表按这两个通道打标签，插件里看到的和客户端里选到的对得上。
 	for _, m := range cat.Recommended {
-		add(m.ID, m.Name, m.Description, "推荐")
+		add(m.ID, m.Name, m.Description, "推荐", laneUsage)
 	}
 	for _, m := range cat.Free {
-		add(m.ID, m.Name, m.Description, "免费")
+		add(m.ID, m.Name, m.Description, "免费", laneUsage)
 	}
-	// 免费通道别名：只对实测可用的短名生成（见 freeLaneVerifiedShorts 注释）。
-	// 官方 free 组里的模型本身就是 cline-free/<短名>，或带 provider 前缀的原 id
-	//（如 z-ai/glm-5.3-flash、poolside/laguna-s-2.1:free），原样暴露即可，不必再造别名。
+	// ClinePass：以「账号可用清单」为准（客户端 ClinePass 下能选到的模型就来自它，
+	// 含 Kimi K3 (free) 这类免费档）；拉不到时退回官方 clinePass 组 + 实测可用别名。
+	passModels, passErr := p.fetchClinePassModels(ctx, client, cred)
+	if passErr == nil && len(passModels) > 0 {
+		for _, m := range passModels {
+			tags := []string{"ClinePass"}
+			if strings.HasPrefix(m.ID, "cline-free/") {
+				tags = append(tags, "免费档")
+			}
+			add(m.ID, m.Name, m.Description, tags...)
+		}
+	} else {
+		for _, m := range cat.ClinePass {
+			add(m.ID, m.Name, m.Description, "通行证", lanePass)
+		}
+	}
+	// 实测可用的 ClinePass 免费档别名（账号清单拉不到时的兜底）
 	for _, m := range append(append([]recommendedModel{}, cat.Recommended...), cat.ClinePass...) {
 		if !freeLaneVerifiedShorts[shortModelName(m.ID)] {
 			continue
 		}
 		if alias := freeChannelAlias(m.ID); alias != "" {
-			add(alias, alias, "免费通道（实测可用）：上游免费通道提供", "免费通道")
+			add(alias, alias, "ClinePass 免费档（实测可用）", "ClinePass", "免费档")
 		}
 	}
-	for _, m := range cat.ClinePass {
-		add(m.ID, m.Name, m.Description, "通行证")
-	}
 	for _, m := range cat.ClineCloud {
-		add(m.ID, m.Name, m.Description, "云通道")
+		add(m.ID, m.Name, m.Description, "云通道", laneCloud)
 	}
 	if all, err := fetchModels(ctx, client); err == nil {
 		for _, m := range all {
 			id := m.ID
 			if strings.HasSuffix(id, ":free") || freeWhitelist[id] {
-				add(id, id, "", "免费")
+				add(id, id, "", "免费", laneUsage)
 			}
 		}
 	}
