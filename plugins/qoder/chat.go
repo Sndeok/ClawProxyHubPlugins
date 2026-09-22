@@ -163,16 +163,35 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		return nil
 	}
 	if empty {
-		if p.host != nil {
-			// 空流诊断：把状态与响应头打进核心日志（docker logs 可见），
-			// 便于判断是「模型 key 不被接受」还是「签名/客户端形态被拒」。
-			p.host.Log("warn", fmt.Sprintf(
-				"上游空流诊断：model=%s status=%d content-type=%q server=%q trace=%q",
-				req.Model, resp.StatusCode, resp.Header.Get("Content-Type"),
-				resp.Header.Get("Server"),
-				firstNonEmpty(resp.Header.Get("X-Trace-Id"), resp.Header.Get("Trace-Id"), resp.Header.Get("X-Request-Id"), "-")))
+		// 空流诊断（内联，避免跨插件共享类型）：既写核心日志（ASCII 前缀便于 grep），
+		// 也塞进错误详情（前端「日志 → 详情」直接可见）。最关键一条是 inCatalog：
+		// 本次请求的模型 key 是否真在账号模型目录里 —— 不在时上游通常回 200 + 空流。
+		keys := make([]string, 0, 16)
+		inCatalog := false
+		if models, mErr := p.fetchModels(ctx, cred); mErr == nil {
+			for _, m := range models {
+				keys = append(keys, m.Key)
+				if m.Key == req.Model {
+					inCatalog = true
+				}
+			}
 		}
-		return stream.Send(failed(429, "上游返回空内容：已暂停该账号并换号重试（详见核心日志「上游空流诊断」）"))
+		diag := fmt.Sprintf("%s-empty-stream model=%q inCatalog=%v http=%d content-type=%q server=%q trace=%q bodyLen=%d",
+			"qoder", req.Model, inCatalog, resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Server"),
+			firstNonEmpty(resp.Header.Get("X-Trace-Id"), resp.Header.Get("Trace-Id"), resp.Header.Get("X-Request-Id"), "-"),
+			len(encoded))
+		diag += printf("\nx-model-key=%q login-version=%q cosy-version=%q",
+			httpReq.Header.Get("x-model-key"), httpReq.Header.Get("login-version"), httpReq.Header.Get("cosy-version"))
+		if len(keys) > 0 {
+			diag += printf("\n账号模型目录（%d）: %s", len(keys), strings.Join(keys, ", "))
+		} else {
+			diag += "\n账号模型目录: 拉取失败（无法判定 key 是否有效）"
+		}
+		diag += printf("\n响应头: %v", resp.Header)
+		if p.host != nil {
+			p.host.Log("warn", strings.SplitN(diag, "\n", 2)[0])
+		}
+		return stream.Send(failedDetail(429, "qoder 上游返回空内容（已暂停该账号并换号重试），诊断见详情", diag))
 	}
 	parser.Finish()
 	return nil
@@ -540,3 +559,6 @@ func asEnvelopeError(err error, target **qodersign.EnvelopeError) bool {
 	}
 	return false
 }
+
+// printf fmt.Sprintf 简写（诊断拼装用，避免重复写返回值处理）。
+func printf(format string, args ...interface{}) string { return fmt.Sprintf(format, args...) }
