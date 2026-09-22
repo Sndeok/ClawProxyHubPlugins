@@ -81,6 +81,30 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 					"description": "直连模式使用，留空 = https://joycode-api.jd.com",
 					"default": ""
 				},
+				"outbound_user_agent": {
+					"type": "string",
+					"title": "出站 User-Agent（整段）",
+					"description": "留空 = 按下面的客户端名称/版本拼装（已对齐官方 JoyCode 分发包指纹）",
+					"default": ""
+				},
+				"outbound_client_name": {
+					"type": "string",
+					"title": "客户端名称",
+					"description": "UA 里 <名称>/<版本> 的名称段；留空 = JoyCode",
+					"default": "JoyCode"
+				},
+				"outbound_client_version": {
+					"type": "string",
+					"title": "客户端版本",
+					"description": "UA 的 JoyCode/<版本> 与请求体 clientVersion；留空 = 用插件设置里的客户端版本",
+					"default": ""
+				},
+				"outbound_cli_version": {
+					"type": "string",
+					"title": "CLI 版本（JoyCode 不适用）",
+					"description": "JoyCode 官方客户端 UA 没有 CLI 段，此项留空即可，填了也不会进 UA",
+					"default": ""
+				},
 				"extra_headers": {
 					"type": "string",
 					"title": "额外请求头",

@@ -120,6 +120,18 @@ func TestJoyHeaders(t *testing.T) {
 
 // ---------- 凭据解析 ----------
 
+// 出站 UA 默认值必须与官方分发包一致（指纹不对容易被上游风控）。
+func TestJoyBuildUserAgent(t *testing.T) {
+	got := joyBuildUserAgent("JoyCode", joyDefaultVersion)
+	want := "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) JoyCode/2.7.5 Chrome/133.0.0.0 Electron/35.2.0 Safari/537.36"
+	if got != want {
+		t.Errorf("UA 不符\n got %s\nwant %s", got, want)
+	}
+	if custom := joyBuildUserAgent("MyClient", "9.9.9"); !strings.Contains(custom, "MyClient/9.9.9") {
+		t.Errorf("自定义名称/版本未生效: %s", custom)
+	}
+}
+
 func TestJoyParseCredentialInput(t *testing.T) {
 	t.Run("回调URL", func(t *testing.T) {
 		c, err := parseJoyCredentialInput("http://127.0.0.1:19999/api/oauth-callback?pt_key=AA_hz&login_type=PIN&tenant=JOYCODE&user_id=99")

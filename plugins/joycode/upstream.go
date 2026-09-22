@@ -191,7 +191,22 @@ func (p *plugin) settingStr(key, def string) string {
 	return def
 }
 
-func (p *plugin) clientVersion() string { return p.settingStr("client_version", joyDefaultVersion) }
+// clientVersion 出站版本号：核心「出站标识」优先，其次插件自有设置，最后内置默认。
+// 两处都用于 UA 的 <客户端名称>/<版本> 与请求体 clientVersion。
+func (p *plugin) clientVersion() string {
+	if v := strings.TrimSpace(str(p.settings()["outbound_client_version"])); v != "" {
+		return v
+	}
+	return p.settingStr("client_version", joyDefaultVersion)
+}
+
+// clientName 出站客户端名称（默认对齐官方分发包的 JoyCode）。
+func (p *plugin) clientName() string {
+	if v := strings.TrimSpace(str(p.settings()["outbound_client_name"])); v != "" {
+		return v
+	}
+	return joyClientName
+}
 
 // colorBase 解析出站网关地址；返回空串表示走直连 v2。
 func (p *plugin) colorBase(cred *joyCred) string {
@@ -269,9 +284,18 @@ func (p *plugin) requestURL(cred *joyCred, endpoint string) string {
 
 // ---------- 请求头 ----------
 
-func joyUserAgent(ver string) string {
+// joyBuildUserAgent 按官方指纹拼装 UA（纯函数，便于测试）。
+func joyBuildUserAgent(name, ver string) string {
 	return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) " +
-		"JoyCode/" + ver + " Chrome/133.0.0.0 Electron/35.2.0 Safari/537.36"
+		name + "/" + ver + " Chrome/133.0.0.0 Electron/35.2.0 Safari/537.36"
+}
+
+// joyUserAgent 出站 UA；outbound_user_agent 非空时整段覆盖。
+func (p *plugin) joyUserAgent() string {
+	if v := strings.TrimSpace(str(p.settings()["outbound_user_agent"])); v != "" {
+		return v
+	}
+	return joyBuildUserAgent(p.clientName(), p.clientVersion())
 }
 
 // joyHeaders OpenAI 方言出站头（流式与非流式都用 identity，避免 gzip 缓冲）。
@@ -281,7 +305,7 @@ func (p *plugin) joyHeaders(cred *joyCred, stream bool) http.Header {
 	h.Set("source-type", joySourceType)
 	h.Set("ptKey", cred.PtKey)
 	h.Set("loginType", joyLoginTypeFor(cred, false))
-	h.Set("User-Agent", joyUserAgent(p.clientVersion()))
+	h.Set("User-Agent", p.joyUserAgent())
 	h.Set("Accept", "*/*")
 	h.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	if stream {
