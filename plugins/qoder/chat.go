@@ -141,7 +141,10 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		ensureStart()
 		_ = stream.Send(ev)
 	})
-	scanner := bufio.NewScanner(qodersign.WrapNested(resp.Body))
+	// 抓上游原始响应开头（最多 2KB）：空流时能看清上游到底回了什么格式。
+	// TeeReader 包在 WrapNested 之前，拿到的是未解包的原始字节。
+	tap := &limitedWriter{max: 2048}
+	scanner := bufio.NewScanner(qodersign.WrapNested(io.TeeReader(resp.Body, tap)))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		parser.Feed(scanner.Text())
@@ -188,6 +191,11 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 			diag += "\n账号模型目录: 拉取失败（无法判定 key 是否有效）"
 		}
 		diag += printf("\n响应头: %v", resp.Header)
+		if len(tap.buf) > 0 {
+			diag += "\n上游原始响应（前 2KB）:\n" + string(tap.buf)
+		} else {
+			diag += "\n上游原始响应: 空（连接立即结束）"
+		}
 		if p.host != nil {
 			p.host.Log("warn", strings.SplitN(diag, "\n", 2)[0])
 		}
@@ -568,3 +576,20 @@ func asEnvelopeError(err error, target **qodersign.EnvelopeError) bool {
 
 // printf fmt.Sprintf 简写（诊断拼装用，避免重复写返回值处理）。
 func printf(format string, args ...interface{}) string { return fmt.Sprintf(format, args...) }
+
+// limitedWriter 只保留前 max 字节（空流诊断用：抓上游原始响应开头）。
+type limitedWriter struct {
+	buf []byte
+	max int
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if len(w.buf) < w.max {
+		n := w.max - len(w.buf)
+		if n > len(p) {
+			n = len(p)
+		}
+		w.buf = append(w.buf, p[:n]...)
+	}
+	return len(p), nil
+}
