@@ -11,6 +11,7 @@
 | `cline` | Cline（cline.bot）：WorkOS 设备授权 / 粘贴 refreshToken，免费额度模型（含免费通道串行保护） |
 | `opencode` | OpenCode Zen / Zen Go：Zen Key / Go 订阅 Key / 匿名免费通道（免账号），按模型原生协议走 chat / messages / responses |
 | `commandcode` | Command Code（api.commandcode.ai）：user_ Key + 设备指纹伪装 + lifecycle 上报，AI-SDK 事件流 |
+| `joycode` | 京东 JoyCode（joycode-api.jd.com）：京东账号扫码授权 / 粘贴 ptKey+userId，color 网关 HMAC 签名，GLM / Kimi / MiniMax / Doubao / Claude-Opus 等模型 |
 
 ## 目录约定
 
