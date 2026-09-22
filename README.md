@@ -9,6 +9,8 @@
 | `qoder` | Qoder（qoder.sh / qoder.com.cn）：浏览器设备授权 / PAT / 粘贴 dt- 令牌，额度与每日签到 |
 | `qoderwork` | QoderWork（CN）：浏览器设备授权 / 粘贴 dt- 令牌，额度与每日签到 |
 | `cline` | Cline（cline.bot）：WorkOS 设备授权 / 粘贴 refreshToken，免费额度模型（含免费通道串行保护） |
+| `opencode` | OpenCode Zen / Zen Go：Zen Key / Go 订阅 Key / 匿名免费通道（免账号），按模型原生协议走 chat / messages / responses |
+| `commandcode` | Command Code（api.commandcode.ai）：user_ Key + 设备指纹伪装 + lifecycle 上报，AI-SDK 事件流 |
 
 ## 目录约定
 
