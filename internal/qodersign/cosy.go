@@ -157,9 +157,8 @@ func (s *Session) ApplyHeaders(req *http.Request, cfg HeaderConfig, body, uid, m
 	if cfg.BusinessType != "" {
 		h.Set("cosy-business-type", cfg.BusinessType)
 	}
-	if cfg.ClientIP != "" {
-		h.Set("cosy-clientip", cfg.ClientIP)
-	}
+	// 参考实现（qoderwork2api）固定下发 cosy-clientip，缺失时上游可能判为非法客户端
+	h.Set("cosy-clientip", orDefault(cfg.ClientIP, "169.254.198.161"))
 	if modelKey != "" { // Qoder 系用 x-model-key 指定上游模型
 		h.Set("x-model-key", modelKey)
 		h.Set("x-model-source", "system")

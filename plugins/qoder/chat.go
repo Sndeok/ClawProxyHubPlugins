@@ -58,6 +58,15 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 			DefaultReasoningEffort: dflt,
 		})
 	}
+	if p.host != nil {
+		// 模型 key 诊断：客户端里显示的模型名必须与这里的 key 完全一致，
+		// 否则对话会因 key 无效被上游返回空流（docker logs 里搜「模型目录」）。
+		keys := make([]string, 0, len(out))
+		for _, m := range out {
+			keys = append(keys, m.Id)
+		}
+		p.host.Log("info", fmt.Sprintf("模型目录 %d 个（上游原始 key）：%s", len(keys), strings.Join(keys, ", ")))
+	}
 	return &pb.ModelList{Models: out}, nil
 }
 
@@ -154,7 +163,16 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		return nil
 	}
 	if empty {
-		return stream.Send(failed(429, "上游返回空内容：已暂停该账号并换号重试"))
+		if p.host != nil {
+			// 空流诊断：把状态与响应头打进核心日志（docker logs 可见），
+			// 便于判断是「模型 key 不被接受」还是「签名/客户端形态被拒」。
+			p.host.Log("warn", fmt.Sprintf(
+				"上游空流诊断：model=%s status=%d content-type=%q server=%q trace=%q",
+				req.Model, resp.StatusCode, resp.Header.Get("Content-Type"),
+				resp.Header.Get("Server"),
+				firstNonEmpty(resp.Header.Get("X-Trace-Id"), resp.Header.Get("Trace-Id"), resp.Header.Get("X-Request-Id"), "-")))
+		}
+		return stream.Send(failed(429, "上游返回空内容：已暂停该账号并换号重试（详见核心日志「上游空流诊断」）"))
 	}
 	parser.Finish()
 	return nil
