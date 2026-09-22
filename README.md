@@ -5,7 +5,7 @@
 | 插件 | 说明 |
 | --- | --- |
 | `lobsterai` | 网易有道 LobsterAI：浏览器 OAuth / 凭据文件登录，每日签到 |
-| `workbuddy` | 腾讯 WorkBuddy / CodeBuddy：手机验证码 / 浏览器授权 / 凭据文件登录，签到、盲盒、旅行、成长任务 |
+| `workbuddy` | 腾讯 WorkBuddy / CodeBuddy：手机验证码 / 浏览器授权 / 凭据文件登录，签到、盲盒、旅行、成长任务（旅行会自动补 `first_buddy` 新手门槛；识别上游内容审核拒绝） |
 | `qoder` | Qoder（qoder.sh / qoder.com.cn）：浏览器设备授权 / PAT / 粘贴 dt- 令牌，额度与每日签到 |
 | `qoderwork` | QoderWork（CN）：浏览器设备授权 / 粘贴 dt- 令牌，额度与每日签到 |
 | `cline` | Cline（cline.bot）：WorkOS 设备授权 / 粘贴 refreshToken，免费额度模型（含免费通道串行保护） |

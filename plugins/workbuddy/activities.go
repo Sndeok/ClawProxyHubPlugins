@@ -183,26 +183,11 @@ func (p *plugin) runTravel(ctx context.Context, cred *credential) (*pb.RunTaskRe
 		if st.DailyLimited {
 			return &pb.RunTaskResponse{Summary: "跳过：今日旅行已达上限"}, nil
 		}
-		if err := p.ensureBuddy(ctx, cred, st.BuddyID); err != nil {
-			if isBuddyStateError(err) {
-				return &pb.RunTaskResponse{Summary: "跳过：无可派出的 Buddy（领养门槛未达成）"}, nil
-			}
-			return nil, err
-		}
-		locID, err := p.travelLocation(ctx, cred)
+		summary, err := p.departTravel(ctx, cred, st.BuddyID)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := p.actPost(ctx, cred, actTravelGo, map[string]interface{}{"location_id": locID}, "猫猫旅行出发"); err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "already traveling") {
-				return &pb.RunTaskResponse{Summary: "已在途（状态重查确认）"}, nil
-			}
-			if isBuddyStateError(err) {
-				return &pb.RunTaskResponse{Summary: "跳过：无可派出的 Buddy"}, nil
-			}
-			return nil, err
-		}
-		return &pb.RunTaskResponse{Summary: "已派出 Buddy 旅行"}, nil
+		return &pb.RunTaskResponse{Summary: summary}, nil
 
 	case st.State == "arrived" || (st.State == "traveling" && st.ArriveAt > 0 && st.ServerNow >= st.ArriveAt):
 		if st.RecordID == 0 {
@@ -388,4 +373,144 @@ func (p *plugin) growthTasks(ctx context.Context, cred *credential) ([]growthTas
 		return nil, fmt.Errorf("成长任务解析失败: %w", err)
 	}
 	return list.Tasks, nil
+}
+
+// departTravel 领养（必要时自动过 first_buddy 新手门槛）后派发旅行。
+// 返回值：非空 summary = 本次跳过/已完成（不算错误）；err 非 nil = 真失败。
+func (p *plugin) departTravel(ctx context.Context, cred *credential, buddyID int64) (string, error) {
+	err := p.ensureBuddy(ctx, cred, buddyID)
+	if err != nil && isBuddyStateError(err) {
+		// 领养门槛几乎总是 first_buddy 新手任务未完成（需要一次真实对话 + 埋点）。
+		// 用户通常只跑「猫猫旅行」，于是永远卡在门槛外 —— 这里主动补一次。
+		ok, doneErr := p.ensureFirstBuddyDone(ctx, cred)
+		if doneErr != nil {
+			return "跳过：领养门槛未达成（自动补 first_buddy 失败：" + doneErr.Error() + "）", nil
+		}
+		if !ok {
+			return "跳过：领养门槛未达成（first_buddy 新手任务未完成）", nil
+		}
+		err = p.ensureBuddy(ctx, cred, buddyID)
+	}
+	if err != nil {
+		if isBuddyStateError(err) {
+			return "跳过：无可派出的 Buddy（领养门槛未达成）", nil
+		}
+		return "", err
+	}
+	locID, err := p.travelLocation(ctx, cred)
+	if err != nil {
+		return "", err
+	}
+	if _, err := p.actPost(ctx, cred, actTravelGo, map[string]interface{}{"location_id": locID}, "猫猫旅行出发"); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "already traveling") {
+			return "已在途（状态重查确认）", nil
+		}
+		if isBuddyStateError(err) {
+			return "跳过：无可派出的 Buddy", nil
+		}
+		return "", err
+	}
+	return "已派出 Buddy 旅行", nil
+}
+
+// ensureFirstBuddyDone 复用成长任务链路把 first_buddy 推到 completed：
+// 接取（single 型）→ 发对话补齐次数（advanceTask 内部带 chat_request_send 埋点）→ 复查。
+// 返回 true = 门槛已过（或账号本就没有该任务）。
+func (p *plugin) ensureFirstBuddyDone(ctx context.Context, cred *credential) (bool, error) {
+	tasks, err := p.growthTasks(ctx, cred)
+	if err != nil {
+		return false, err
+	}
+	find := func() *growthTask {
+		for i := range tasks {
+			if tasks[i].Code == "first_buddy" {
+				return &tasks[i]
+			}
+		}
+		return nil
+	}
+	t := find()
+	if t == nil {
+		return true, nil // 没有这个任务 = 门槛与它无关
+	}
+	if t.AcceptStatus == "completed" {
+		return true, nil
+	}
+	if t.action() == "accept" {
+		if _, err := p.actPost(ctx, cred, actTasksAccept,
+			map[string]interface{}{"task_codes": []string{"first_buddy"}}, "新手任务接取"); err != nil {
+			return false, err
+		}
+		if tasks, err = p.growthTasks(ctx, cred); err != nil {
+			return false, err
+		}
+		if t = find(); t == nil {
+			return true, nil
+		}
+	}
+	if t.action() != "advance" {
+		return false, nil
+	}
+	// first_buddy 的官方判定要求「一次真实对话」：只发 /v2/report 埋点通常不计入，
+	// 这里直接按客户端行为发一条最小对话（growthEvent 内嵌在 extra_vars 里），
+	// 与另一实现 codebuddy2api 的 first-Buddy onboarding 保持一致。
+	if err := p.realFirstBuddyChat(ctx, cred); err != nil {
+		// 真实对话不可用时退回埋点链路，至少推进依赖埋点的其它任务
+		if _, aerr := p.advanceTask(ctx, cred, *t); aerr != nil {
+			return false, err
+		}
+	}
+	// 复查：官方结算可能是异步的，这里以当次结果为准（未完成则下次运行再补）
+	if tasks, err = p.growthTasks(ctx, cred); err != nil {
+		return false, err
+	}
+	if t = find(); t != nil && t.AcceptStatus == "completed" {
+		return true, nil
+	}
+	return false, nil
+}
+
+// realFirstBuddyChat 发一条最小真实对话（Say OK，max_tokens 32），并把 chat_request_send
+// 事件按官方客户端形态内嵌到 extra_vars.growthEvent —— 首只 Buddy 的新手任务据此判定完成。
+func (p *plugin) realFirstBuddyChat(ctx context.Context, cred *credential) error {
+	ids := newConversation()
+	co := chatEventOpts{model: defaultModel, modelName: defaultModelName, agentType: "main"}
+	growth, err := json.Marshal([]map[string]interface{}{chatRequestSendEvent(cred, ids, co)})
+	if err != nil {
+		return err
+	}
+	body := map[string]interface{}{
+		"model": defaultModel,
+		"messages": []map[string]string{
+			{"role": "system", "content": "Reply with OK only. Do not use tools."},
+			{"role": "user", "content": "Say OK."},
+		},
+		"stream":         true,
+		"stream_options": map[string]interface{}{"include_usage": true},
+		"max_tokens":     32,
+		"extra_vars":     map[string]interface{}{"growthEvent": string(growth)},
+	}
+	h := p.headers(cred, true)
+	h["Accept"] = "text/event-stream"
+	h["X-Conversation-ID"] = ids.conversation
+	h["X-Session-ID"] = ids.conversation
+	h["X-Parent-Conversation-ID"] = ids.conversation
+	h["X-Request-ID"] = ids.request
+	h["X-Root-Request-ID"] = ids.request
+	h["X-Conversation-Request-ID"] = ids.request
+	h["X-Conversation-Message-ID"] = ids.message
+	h["X-Agent-Purpose"] = "conversation"
+
+	resp, err := postJSON(ctx, p.hc(cred), upstreamBase+pathChat, h, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("新手对话 HTTP %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	// 读到流结束（有界）后丢弃：只需官方服务端处理这次对话
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	return nil
 }

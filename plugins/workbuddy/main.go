@@ -28,8 +28,10 @@ import (
 	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
+// upstreamBase 上游主站。var 而非 const：单测用 httptest 覆盖它做状态机回归。
+var upstreamBase = "https://copilot.tencent.com"
+
 const (
-	upstreamBase = "https://copilot.tencent.com"
 	loginBase    = "https://www.workbuddy.cn"
 	pathChat     = "/v2/chat/completions"
 	pathRefresh  = "/v2/plugin/auth/token/refresh"
@@ -1247,7 +1249,25 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		return err
 	}
 
-	parser := openaiup.NewParser(func(ev *pb.StreamEvent) { _ = stream.Send(ev) })
+	// 内容审核识别：上游命中审核是「200 + 固定拒绝文案」，直接透传会让客户端把它
+	// 当成模型回复。累积正文后按 OpenAI 标准标记 finish_reason=content_filter。
+	var replyBuf strings.Builder
+	parser := openaiup.NewParser(func(ev *pb.StreamEvent) {
+		switch e := ev.Event.(type) {
+		case *pb.StreamEvent_ContentDelta:
+			if replyBuf.Len() < 4096 {
+				replyBuf.WriteString(e.ContentDelta.Text)
+			}
+		case *pb.StreamEvent_MessageFinish:
+			if e.MessageFinish != nil && isContentFilterText(replyBuf.String()) {
+				e.MessageFinish.FinishReason = "content_filter"
+				if p.host != nil {
+					p.host.Log("warn", "上游内容审核拦截：本次回复为固定拒绝文案")
+				}
+			}
+		}
+		_ = stream.Send(ev)
+	})
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	sawEvent := false
