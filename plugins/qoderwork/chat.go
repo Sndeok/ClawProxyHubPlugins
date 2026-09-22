@@ -304,7 +304,13 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		if p.host != nil {
 			p.host.Log("warn", strings.SplitN(diag, "\n", 2)[0])
 		}
-		return stream.Send(failedDetail(429, "qoderwork 上游返回空内容（已暂停该账号并换号重试），诊断见详情", diag))
+		// 诊断同时拼进错误消息（在线测试结果 / 日志列表都能直接看到，不再依赖 detail 通路）
+		brief := fmt.Sprintf("qoderwork 上游返回空内容（已暂停该账号并换号重试）｜model=%s inCatalog=%v http=%d",
+			req.Model, inCatalog, resp.StatusCode)
+		if len(keys) > 0 {
+			brief += "｜账号目录: " + strings.Join(keys, ",")
+		}
+		return stream.Send(failedDetail(429, brief, diag))
 	}
 	parser.Finish()
 	return nil
