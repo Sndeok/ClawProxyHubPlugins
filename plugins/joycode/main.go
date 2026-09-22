@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -334,6 +335,120 @@ func joyNoteSection(id, title, detail string) *pb.ProfileSection {
 			{Label: map[string]string{"zh": "说明", "en": "Note"}, Value: detail},
 		},
 	}
+}
+
+// ---------- 模型目录 ----------
+
+// ListModels 上游模型目录 → 信封 ModelInfo。
+// 上游给 maxTotalTokens / respMaxTokens / features；能力表补齐系列、视觉与推理档位。
+// 目录里缺的内置模型（如默认 JoyAI-Code-1.5）在此补回，避免路由同步漏掉默认模型。
+func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.ModelList, error) {
+	// 空凭据 = 核心刷新聚合目录（RefreshCatalog 对每个插件传空 blob）：
+	// 返回内置清单，保证未建路由时 /v1/models 也能透出可用模型名。
+	if blob == nil || len(blob.GetBlob()) == 0 {
+		return &pb.ModelList{Models: joyFallbackModelInfos()}, nil
+	}
+	cred, err := joyCredFrom(blob)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	models, err := p.joyFetchModels(ctx, cred)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, "拉取上游模型目录失败："+err.Error())
+	}
+	seen := map[string]bool{}
+	out := make([]*pb.ModelInfo, 0, len(models)+len(joyFallbackModels))
+	for _, m := range models {
+		id := joyModelID(m)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, joyModelToInfo(id, m.Label, m.MaxTotalTokens, m.RespMaxTokens, m.Features))
+	}
+	for _, id := range joyFallbackModels {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, joyModelToInfo(id, id, 0, 0, nil))
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Id < out[j].Id })
+	return &pb.ModelList{Models: out}, nil
+}
+
+// joyFallbackModelInfos 内置清单 → 信封模型（无凭据时的兜底目录）。
+func joyFallbackModelInfos() []*pb.ModelInfo {
+	out := make([]*pb.ModelInfo, 0, len(joyFallbackModels))
+	for _, id := range joyFallbackModels {
+		out = append(out, joyModelToInfo(id, id, 0, 0, nil))
+	}
+	return out
+}
+
+// joyModelToInfo 组装单个模型元数据：上游字段优先，能力表兜底。
+func joyModelToInfo(id, label string, ctxTokens, outTokens int, features []string) *pb.ModelInfo {
+	cap, hasCap := joyModelCaps[id]
+	ctxWindow := int32(ctxTokens)
+	if ctxWindow <= 0 && hasCap {
+		ctxWindow = int32(cap.Context)
+	}
+	maxOut := int32(outTokens)
+	if maxOut <= 0 && hasCap {
+		maxOut = int32(cap.Output)
+	}
+	series := ""
+	if hasCap {
+		series = cap.Series
+	}
+	tags := make([]string, 0, len(features)+2)
+	for _, f := range features {
+		if v := strings.TrimSpace(f); v != "" {
+			tags = append(tags, v)
+		}
+	}
+	if hasCap && cap.Vision && !joyHasTag(tags, "多模态") {
+		tags = append(tags, "多模态")
+	}
+	reasoning := joyReasoningModel(id) || (hasCap && cap.Reason) || joyFeatureContains(features, "reason")
+	if reasoning && !joyHasTag(tags, "支持推理") {
+		tags = append(tags, "支持推理")
+	}
+	info := &pb.ModelInfo{
+		Id:              id,
+		Label:           map[string]string{"zh": joyOrDefault(label, id), "en": joyOrDefault(label, id)},
+		ContextWindow:   ctxWindow,
+		MaxOutputTokens: maxOut,
+		SupportsTools:   true,
+		SupportsStream:  true,
+		Series:          series,
+		Tags:            tags,
+	}
+	if reasoning {
+		info.ReasoningEfforts = []string{"low", "medium", "high"}
+		info.DefaultReasoningEffort = "high"
+	}
+	return info
+}
+
+// joyHasTag 标签去重判断。
+func joyHasTag(tags []string, want string) bool {
+	for _, t := range tags {
+		if t == want {
+			return true
+		}
+	}
+	return false
+}
+
+// joyFeatureContains 上游 features 里是否含某关键字（不区分大小写）。
+func joyFeatureContains(features []string, kw string) bool {
+	for _, f := range features {
+		if strings.Contains(strings.ToLower(f), strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 凭据解析 ----------

@@ -489,6 +489,71 @@ func TestJoyModelMapping(t *testing.T) {
 	}
 }
 
+// 模型元数据映射：上游字段优先，能力表兜底。
+func TestJoyModelToInfo(t *testing.T) {
+	// 上游给了上下文/输出 → 用上游值
+	got := joyModelToInfo("GLM-5.1", "GLM-5.1", 131072, 8192, []string{"reasoning", "chat"})
+	if got.ContextWindow != 131072 || got.MaxOutputTokens != 8192 {
+		t.Errorf("上游字段未优先: ctx=%d out=%d", got.ContextWindow, got.MaxOutputTokens)
+	}
+	if got.Series != "GLM" {
+		t.Errorf("系列未从能力表补齐: %s", got.Series)
+	}
+	if got.DefaultReasoningEffort != "high" || len(got.ReasoningEfforts) == 0 {
+		t.Errorf("推理档位缺失: %+v", got.ReasoningEfforts)
+	}
+	if !joyHasTag(got.Tags, "支持推理") {
+		t.Errorf("推理标签缺失: %v", got.Tags)
+	}
+
+	// 上游只给名称 → 能力表兜底上下文/输出
+	got = joyModelToInfo("Claude-Opus-4.7", "Claude Opus 4.7", 0, 0, nil)
+	if got.ContextWindow != 200000 || got.MaxOutputTokens != 32000 {
+		t.Errorf("能力表兜底失败: ctx=%d out=%d", got.ContextWindow, got.MaxOutputTokens)
+	}
+	if got.SupportsTools != true || got.SupportsStream != true {
+		t.Errorf("工具/流式能力应为 true: %+v", got)
+	}
+
+	// 未知模型：不崩、字段为 0、标签为空
+	got = joyModelToInfo("Unknown-Model-X", "", 0, 0, nil)
+	if got.Id != "Unknown-Model-X" || got.Label["zh"] != "Unknown-Model-X" {
+		t.Errorf("未知模型 label 兜底不符: %+v", got.Label)
+	}
+	if got.DefaultReasoningEffort != "" {
+		t.Errorf("未知模型不应带推理档位: %s", got.DefaultReasoningEffort)
+	}
+
+	// 视觉模型补「多模态」标签
+	if got := joyModelToInfo("Kimi-K2.6", "Kimi K2.6", 0, 0, nil); !joyHasTag(got.Tags, "多模态") {
+		t.Errorf("视觉模型缺多模态标签: %v", got.Tags)
+	}
+}
+
+// 空凭据（核心刷新聚合目录）必须返回兜底清单而不是报错，否则 /v1/models 为空。
+func TestJoyListModelsWithoutCredential(t *testing.T) {
+	p := &plugin{}
+	ml, err := p.ListModels(context.Background(), &pb.CredentialBlob{})
+	if err != nil {
+		t.Fatalf("空凭据应返回兜底清单，实际报错: %v", err)
+	}
+	if len(ml.Models) != len(joyFallbackModels) {
+		t.Errorf("兜底模型数不符: got %d want %d", len(ml.Models), len(joyFallbackModels))
+	}
+	var hasDefault bool
+	for _, mo := range ml.Models {
+		if mo.Id == joyDefaultModel {
+			hasDefault = true
+		}
+		if mo.Id == "" || mo.ContextWindow == 0 {
+			t.Errorf("兜底模型元数据不完整: %+v", mo)
+		}
+	}
+	if !hasDefault {
+		t.Errorf("兜底清单缺少默认模型 %s", joyDefaultModel)
+	}
+}
+
 func TestJoyMaskUserID(t *testing.T) {
 	if got := maskUserID("15800006694"); got != "158***694" {
 		t.Errorf("掩码不符: %s", got)
