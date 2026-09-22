@@ -88,7 +88,9 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 			{
 				Id: "oauth", Label: map[string]string{"zh": "浏览器授权（设备码）", "en": "Browser (device flow)"},
 				Capabilities: []string{"refreshable", "auto_relogin", "profile"},
-				Callback:     "auto_wait",
+				// auto：插件自己在服务端轮询上游，域名部署（非本机访问）也能自动完成，
+				// 不会退化成「粘贴回调地址」；auto_wait 只在本机访问时才轮询。
+				Callback: "auto",
 			},
 			{
 				Id: "token", Label: map[string]string{"zh": "粘贴令牌", "en": "Paste tokens"},
