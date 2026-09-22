@@ -1187,12 +1187,29 @@ func (p *plugin) fetchCredits(ctx context.Context, cred *credential) string {
 	return string(b)
 }
 
-// ListModels 上游按 model=auto 路由，模型目录由客户端自行发现。
+// ListModels 模型目录：直连腾讯模型接口拿显示名 / 上下文 / 最大输出 / 推理档位 / 倍率。
+// 目录接口不可用时回退到 auto（上游按 model=auto 自行路由，账号仍可用）。
 func (p *plugin) ListModels(ctx context.Context, credBlob *pb.CredentialBlob) (*pb.ModelList, error) {
-	return &pb.ModelList{Models: []*pb.ModelInfo{
-		{Id: "auto", Label: map[string]string{"zh": "自动（上游路由）", "en": "Auto (upstream routing)"},
-			SupportsTools: true, SupportsStream: true},
-	}}, nil
+	fallback := &pb.ModelList{Models: []*pb.ModelInfo{autoModel()}}
+	cred, err := credFrom(credBlob)
+	if err != nil {
+		return fallback, nil
+	}
+	models, err := p.fetchModelCatalog(ctx, cred)
+	if err != nil || len(models) == 0 {
+		if p.host != nil && err != nil {
+			p.host.Log("warn", "模型目录不可用，回退 auto："+err.Error())
+		}
+		return fallback, nil
+	}
+	// auto 置顶：客户端默认走上游路由，其余模型按目录顺序
+	out := []*pb.ModelInfo{autoModel()}
+	for _, m := range models {
+		if m.Id != "auto" {
+			out = append(out, m)
+		}
+	}
+	return &pb.ModelList{Models: out}, nil
 }
 
 // ---------- Chat ----------
