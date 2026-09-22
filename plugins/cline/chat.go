@@ -96,7 +96,11 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 	}
 	// ClinePass：以「账号可用清单」为准（客户端 ClinePass 下能选到的模型就来自它，
 	// 含 Kimi K3 (free) 这类免费档）；拉不到时退回官方 clinePass 组 + 实测可用别名。
-	passModels, passErr := p.fetchClinePassModels(ctx, client, cred)
+	// 清单接口同样吃 accessToken：先按需刷新，避免用过期 token 拿到 401
+	if accessTokenExpiring(cred) {
+		_, _ = refreshClineToken(ctx, client, cred)
+	}
+	passModels, passStatus, passErr := p.fetchClinePassModels(ctx, client, cred)
 	if passErr == nil && len(passModels) > 0 {
 		for _, m := range passModels {
 			tags := []string{"ClinePass"}
@@ -106,8 +110,13 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 			add(m.ID, m.Name, m.Description, tags...)
 		}
 	} else {
+		// 账号清单没取到时，把状态码打在标签上，方便一眼看出是 401 还是解析问题
+		missTag := "ClinePass 未同步"
+		if passStatus > 0 {
+			missTag = fmt.Sprintf("ClinePass 未同步:HTTP %d", passStatus)
+		}
 		for _, m := range cat.ClinePass {
-			add(m.ID, m.Name, m.Description, "通行证", lanePass)
+			add(m.ID, m.Name, m.Description, "通行证", lanePass, missTag)
 		}
 	}
 	// 实测可用的 ClinePass 免费档别名（账号清单拉不到时的兜底）

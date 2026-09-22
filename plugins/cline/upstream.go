@@ -301,24 +301,36 @@ func fetchRecommended(ctx context.Context, client *http.Client) (*clineCatalog, 
 // fetchClinePassModels 拉「当前账号可用的 ClinePass 模型」——Cline 客户端第二个 provider
 // （ClinePass）的清单来源，包含 Kimi K3 (free) 这类免费档。必须带账号 accessToken：
 // 未登录 / 无资格时上游返回 401，此时调用方退回官方 recommended-models 的 clinePass 组。
-func (p *plugin) fetchClinePassModels(ctx context.Context, client *http.Client, cred *clineCred) ([]recommendedModel, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", clineAPIBase+clinePassModelsPath, nil)
-	if err != nil {
-		return nil, err
+func (p *plugin) fetchClinePassModels(ctx context.Context, client *http.Client, cred *clineCred) ([]recommendedModel, int, error) {
+	// 鉴权变体：客户端用 Bearer workos:<accessToken>；个别网关只认裸 token，401 时再试一次
+	for i, auth := range []string{"Bearer workos:" + cred.AccessToken, "Bearer " + cred.AccessToken} {
+		req, err := http.NewRequestWithContext(ctx, "GET", clineAPIBase+clinePassModelsPath, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		for k, v := range p.clineHeaders(cred, "") {
+			req.Header.Set(k, v)
+		}
+		req.Header.Set("Authorization", auth)
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, 0, err
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized && i == 0 {
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			return nil, resp.StatusCode, fmt.Errorf("ClinePass 模型目录 HTTP %d: %s", resp.StatusCode, clip(string(body), 200))
+		}
+		list, perr := parseModelList(body)
+		if perr != nil {
+			return nil, resp.StatusCode, perr
+		}
+		return list, resp.StatusCode, nil
 	}
-	for k, v := range p.clineHeaders(cred, "") {
-		req.Header.Set(k, v)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("ClinePass 模型目录 HTTP %d: %s", resp.StatusCode, clip(string(body), 200))
-	}
-	return parseModelList(body)
+	return nil, http.StatusUnauthorized, fmt.Errorf("ClinePass 模型目录未授权（401）：该账号没有 ClinePass 清单访问权")
 }
 
 // parseModelList 容错解析上游模型清单：
