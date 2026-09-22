@@ -204,7 +204,7 @@ func buildClineBody(chatBody map[string]interface{}, model, sessionID, effort st
 		"stream":           true, // 免费通道必须流式
 	}
 	if msgs, ok := chatBody["messages"]; ok {
-		body["messages"] = msgs
+		body["messages"] = stripCacheControl(msgs)
 	} else {
 		body["messages"] = []interface{}{}
 	}
@@ -308,4 +308,36 @@ func orHint(err error) string {
 		return "凭据不可用"
 	}
 	return err.Error()
+}
+
+// stripCacheControl 递归移除内容块上的 cache_control。
+//
+// 本上游协议没有该字段（Cline / QoderWork 都是标准 OpenAI 形态），严格校验时可能 400；
+// Qoder 官方形态支持它，因此只在不需要的上游剥离。
+func stripCacheControl(v interface{}) interface{} {
+	switch x := v.(type) {
+	case []interface{}:
+		out := make([]interface{}, 0, len(x))
+		for _, it := range x {
+			out = append(out, stripCacheControl(it))
+		}
+		return out
+	case []map[string]interface{}:
+		out := make([]interface{}, 0, len(x))
+		for _, it := range x {
+			out = append(out, stripCacheControl(it))
+		}
+		return out
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(x))
+		for k, vv := range x {
+			if k == "cache_control" {
+				continue
+			}
+			out[k] = stripCacheControl(vv)
+		}
+		return out
+	default:
+		return v
+	}
 }

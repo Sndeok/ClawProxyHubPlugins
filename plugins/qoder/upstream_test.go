@@ -172,3 +172,104 @@ func TestNormalizeRegion(t *testing.T) {
 		}
 	}
 }
+
+// TestQoderMessagesOfficialShape 消息必须重塑成官方客户端形态：
+// user 用 contents 承载正文、每条都带 response_meta 与 reasoning_content_signature。
+func TestQoderMessagesOfficialShape(t *testing.T) {
+	raw := []map[string]interface{}{
+		{"role": "system", "content": "你是助手"},
+		{"role": "user", "content": "写个快排"},
+		{"role": "assistant", "content": "", "tool_calls": []interface{}{
+			map[string]interface{}{"id": "call_1", "type": "function",
+				"function": map[string]interface{}{"name": "Read", "arguments": "{}"}},
+		}},
+		{"role": "tool", "content": "文件内容", "name": "Read", "tool_call_id": "call_1"},
+	}
+	msgs := qoderMessages(raw)
+	if len(msgs) != 4 {
+		t.Fatalf("消息条数 = %d, want 4", len(msgs))
+	}
+	// user：正文在 contents，content 为空串
+	user, _ := msgs[1].(map[string]interface{})
+	if user["role"] != "user" || user["content"] != "" {
+		t.Errorf("user 消息形态错误: %v", user)
+	}
+	contents, _ := user["contents"].([]interface{})
+	if len(contents) != 1 {
+		t.Fatalf("user.contents 异常: %v", user["contents"])
+	}
+	if part, _ := contents[0].(map[string]interface{}); part["text"] != "写个快排" || part["type"] != "text" {
+		t.Errorf("user.contents[0] = %v", contents[0])
+	}
+	// 每条都带官方必需字段
+	for i, m := range msgs {
+		mm, _ := m.(map[string]interface{})
+		if _, ok := mm["response_meta"]; !ok {
+			t.Errorf("第 %d 条缺 response_meta: %v", i, mm)
+		}
+		if sig, ok := mm["reasoning_content_signature"]; !ok || sig != "" {
+			t.Errorf("第 %d 条缺 reasoning_content_signature: %v", i, mm)
+		}
+	}
+	// assistant 保留 tool_calls；tool 保留 tool_call_id/name
+	asst, _ := msgs[2].(map[string]interface{})
+	if _, ok := asst["tool_calls"]; !ok {
+		t.Errorf("assistant 丢失 tool_calls: %v", asst)
+	}
+	tool, _ := msgs[3].(map[string]interface{})
+	if tool["tool_call_id"] != "call_1" || tool["name"] != "Read" {
+		t.Errorf("tool 消息字段丢失: %v", tool)
+	}
+}
+
+// TestQoderMessagesKeepMultimodalAndCacheControl 多模态块与 prompt 缓存断点原样保留。
+func TestQoderMessagesKeepMultimodalAndCacheControl(t *testing.T) {
+	raw := []map[string]interface{}{
+		{"role": "user", "content": []interface{}{
+			map[string]interface{}{"type": "text", "text": "看图", "cache_control": map[string]interface{}{"type": "ephemeral"}},
+			map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,AA=="}},
+		}},
+	}
+	msgs := qoderMessages(raw)
+	user, _ := msgs[0].(map[string]interface{})
+	contents, _ := user["contents"].([]interface{})
+	if len(contents) != 2 {
+		t.Fatalf("多模态块丢失: %v", user["contents"])
+	}
+	first, _ := contents[0].(map[string]interface{})
+	if _, ok := first["cache_control"]; !ok {
+		t.Error("cache_control 断点在重塑时被丢弃（应原样透传给上游）")
+	}
+	if second, _ := contents[1].(map[string]interface{}); second["type"] != "image_url" {
+		t.Errorf("图片块被改动: %v", contents[1])
+	}
+}
+
+// TestQoderMessagesSystemArrayPreserved 系统提示以块数组下发时（Claude Code 的断点常在这一层）不能丢。
+func TestQoderMessagesSystemArrayPreserved(t *testing.T) {
+	raw := []map[string]interface{}{
+		{"role": "system", "content": []interface{}{
+			map[string]interface{}{"type": "text", "text": "长系统提示", "cache_control": map[string]interface{}{"type": "ephemeral"}},
+		}},
+	}
+	msgs := qoderMessages(raw)
+	sys, _ := msgs[0].(map[string]interface{})
+	if sys["content"] != "" {
+		t.Errorf("块数组系统提示应改用 contents，content 留空: %v", sys)
+	}
+	if _, ok := sys["contents"]; !ok {
+		t.Errorf("系统提示块数组丢失: %v", sys)
+	}
+}
+
+// TestQoderMessagesEmptyFallback 没有任何消息时补一条空 user（上游要求 messages 非空）。
+func TestQoderMessagesEmptyFallback(t *testing.T) {
+	msgs := qoderMessages(nil)
+	if len(msgs) != 1 {
+		t.Fatalf("空输入应补一条消息，实际 %d", len(msgs))
+	}
+	m, _ := msgs[0].(map[string]interface{})
+	if m["role"] != "user" {
+		t.Errorf("兜底消息角色错误: %v", m)
+	}
+}

@@ -141,3 +141,41 @@ func TestSettingsWithoutHost(t *testing.T) {
 		t.Errorf("无 host 时设置应为空表，实际 %v", s)
 	}
 }
+
+// TestStripCacheControl 内容块上的 cache_control 必须被剥离（本协议没有该字段），
+// 同时文本/图片等内容本体保持不动。
+func TestStripCacheControl(t *testing.T) {
+	in := []interface{}{
+		map[string]interface{}{
+			"type": "text", "text": "看图",
+			"cache_control": map[string]interface{}{"type": "ephemeral"},
+		},
+		map[string]interface{}{
+			"type": "image_url",
+			"image_url": map[string]interface{}{
+				"url":           "data:image/png;base64,AA==",
+				"cache_control": map[string]interface{}{"type": "ephemeral"},
+			},
+		},
+	}
+	out := stripCacheControl(in)
+	parts, _ := out.([]interface{})
+	if len(parts) != 2 {
+		t.Fatalf("块数量被改动: %v", out)
+	}
+	first, _ := parts[0].(map[string]interface{})
+	if _, ok := first["cache_control"]; ok {
+		t.Error("顶层 cache_control 未剥离")
+	}
+	if first["text"] != "看图" || first["type"] != "text" {
+		t.Errorf("内容本体被改动: %v", first)
+	}
+	second, _ := parts[1].(map[string]interface{})
+	img, _ := second["image_url"].(map[string]interface{})
+	if _, ok := img["cache_control"]; ok {
+		t.Error("嵌套 cache_control 未剥离")
+	}
+	if img["url"] != "data:image/png;base64,AA==" {
+		t.Errorf("图片地址被改动: %v", img)
+	}
+}

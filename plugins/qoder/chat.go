@@ -192,16 +192,132 @@ func buildQoderBody(chatBody map[string]interface{}, modelKey string, cred *qode
 			"begin_at": now.UnixMilli(), "stage": "start",
 		},
 	}
-	if msgs, ok := chatBody["messages"]; ok {
-		body["messages"] = msgs
-	} else {
-		body["messages"] = []interface{}{}
-	}
+	body["messages"] = qoderMessages(chatBody["messages"])
 	if tools, ok := chatBody["tools"]; ok {
 		body["tools"] = tools // 客户端传了才带
 	}
 	b, _ := json.Marshal(body)
 	return b
+}
+
+// qoderMessages 把客户端消息重塑成官方客户端形态。
+//
+// 官方（以及参考实现 qoder2api）每条消息都带这三样，缺了上游行为未定义：
+//   - user 消息正文放 contents[{type,text,...}]，content 留空字符串
+//   - 每条消息都补 response_meta（空用量信封）
+//   - 每条消息都补 reasoning_content_signature（思考模式下回传校验用，无签名给 ""）
+//
+// 工具调用 / 工具结果 / 多模态内容块原样保留（含 cache_control 断点）。
+func qoderMessages(raw interface{}) []interface{} {
+	out := []interface{}{}
+	for _, m := range asMessages(raw) {
+		role := str(m["role"])
+		switch role {
+		case "user":
+			msg := map[string]interface{}{
+				"role":                        "user",
+				"content":                     "",
+				"contents":                    userContents(m["content"]),
+				"response_meta":               blankResponseMeta(),
+				"reasoning_content_signature": "",
+			}
+			out = append(out, msg)
+		case "assistant":
+			msg := map[string]interface{}{
+				"role":                        "assistant",
+				"content":                     contentText(m["content"]),
+				"response_meta":               blankResponseMeta(),
+				"reasoning_content_signature": "",
+			}
+			if tc, ok := m["tool_calls"]; ok && tc != nil {
+				msg["tool_calls"] = tc
+			}
+			if name := str(m["name"]); name != "" {
+				msg["name"] = name
+			}
+			out = append(out, msg)
+		case "tool":
+			msg := map[string]interface{}{
+				"role":                        "tool",
+				"content":                     contentText(m["content"]),
+				"response_meta":               blankResponseMeta(),
+				"reasoning_content_signature": "",
+			}
+			for _, k := range []string{"name", "tool_call_id"} {
+				if v := str(m[k]); v != "" {
+					msg[k] = v
+				}
+			}
+			out = append(out, msg)
+		default: // system 及其他
+			msg := map[string]interface{}{
+				"role":                        orDefault(role, "user"),
+				"content":                     contentText(m["content"]),
+				"response_meta":               blankResponseMeta(),
+				"reasoning_content_signature": "",
+			}
+			if _, isArr := m["content"].([]interface{}); isArr {
+				// 系统提示以块数组下发时（Claude Code 的 cache_control 断点常在这一层），
+				// 用 contents 承载，避免丢断点
+				msg["content"] = ""
+				msg["contents"] = m["content"]
+			}
+			out = append(out, msg)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, map[string]interface{}{
+			"role":                        "user",
+			"content":                     "",
+			"contents":                    []interface{}{map[string]interface{}{"type": "text", "text": ""}},
+			"response_meta":               blankResponseMeta(),
+			"reasoning_content_signature": "",
+		})
+	}
+	return out
+}
+
+// asMessages 统一消息容器类型（openaiup.ChatBody 产出 []map[string]interface{}）。
+func asMessages(raw interface{}) []map[string]interface{} {
+	switch v := raw.(type) {
+	case []map[string]interface{}:
+		return v
+	case []interface{}:
+		out := make([]map[string]interface{}, 0, len(v))
+		for _, it := range v {
+			if m, ok := it.(map[string]interface{}); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// userContents user 消息正文块数组：纯文本包成 [{type:text,text}]，多模态原样保留。
+func userContents(content interface{}) []interface{} {
+	switch v := content.(type) {
+	case string:
+		return []interface{}{map[string]interface{}{"type": "text", "text": v}}
+	case []interface{}:
+		return v
+	case nil:
+		return []interface{}{map[string]interface{}{"type": "text", "text": ""}}
+	default:
+		return []interface{}{map[string]interface{}{"type": "text", "text": str(v)}}
+	}
+}
+
+// blankResponseMeta 官方消息里的空用量信封。
+func blankResponseMeta() map[string]interface{} {
+	return map[string]interface{}{
+		"id": "",
+		"usage": map[string]interface{}{
+			"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+			"completion_tokens_details": map[string]interface{}{"reasoning_tokens": 0},
+			"prompt_tokens_details":     map[string]interface{}{"cached_tokens": 0},
+		},
+	}
 }
 
 func lastUserPrompt(chatBody map[string]interface{}) string {
