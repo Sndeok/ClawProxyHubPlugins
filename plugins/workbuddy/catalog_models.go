@@ -26,8 +26,8 @@ import (
 const (
 	// 国际版企业端点在前：国内账号访问 /v2 会 404，国际版访问 /console 亦可能失败，
 	// 两条都试一遍的代价只是一次 404。
-	pathModelsV2     = "/v2/enterprises/personal/models"
-	pathModelsV3     = "/v3/config"
+	pathModelsV2      = "/v2/enterprises/personal/models"
+	pathModelsV3      = "/v3/config"
 	pathModelsConsole = "/console/enterprises/personal/models"
 )
 
@@ -90,7 +90,15 @@ func (p *plugin) fetchModelCatalog(ctx context.Context, cred *credential) ([]*pb
 		payload, err := p.getModelPayload(ctx, cred, src.path)
 		if err != nil {
 			lastErr = err
+			if p.host != nil {
+				p.host.Log("warn", "模型目录源不可用 "+src.path+": "+err.Error())
+			}
 			continue
+		}
+		if p.host != nil && len(payload.Models) > 0 {
+			if dump, merr := json.Marshal(payload.Models[0]); merr == nil {
+				p.host.Log("info", "模型目录原始条目("+src.path+"): "+truncate(string(dump), 600))
+			}
 		}
 		ok = append(ok, catalogSource{payload: payload, cliOnly: src.cliOnly})
 	}
