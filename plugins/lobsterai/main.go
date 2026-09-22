@@ -1083,25 +1083,33 @@ func (p *plugin) ListModels(ctx context.Context, credBlob *pb.CredentialBlob) (*
 	if err != nil {
 		return nil, err
 	}
-	var raw []struct {
-		ModelID   string `json:"modelId"`
-		ModelName string `json:"modelName"`
-		APIFormat string `json:"apiFormat"`
-	}
+	// 逐条按原始 JSON 解析：id / 名称 / 方言是必需字段，
+	// 倍率、思考档位、上下文、最大输出等按容错别名映射（见 model_meta.go）。
+	var raw []map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 	var models []*pb.ModelInfo
-	for _, m := range raw {
-		if m.ModelID == "" {
+	for _, item := range raw {
+		modelID := rawString(lookup(item, "id"))
+		if modelID == "" {
+			modelID = rawString(lookup(item, "name"))
+		}
+		if modelID == "" {
 			continue
 		}
-		isAnthropic := m.APIFormat == "anthropic"
-		anthropicModels.Store(m.ModelID, isAnthropic) // Chat 直通判定缓存
-		models = append(models, &pb.ModelInfo{
-			Id: m.ModelID, Label: map[string]string{"en": orDefault(m.ModelName, m.ModelID)},
+		apiFormat := rawString(lookup(item, "apiformat"))
+		isAnthropic := apiFormat == "anthropic"
+		anthropicModels.Store(modelID, isAnthropic) // Chat 直通判定缓存
+		info := &pb.ModelInfo{
+			Id: modelID, Label: map[string]string{"en": modelID},
 			SupportsTools: !isAnthropic, SupportsStream: true,
-		})
+		}
+		enrichModelInfo(info, item)
+		if info.Label["en"] == "" {
+			info.Label = map[string]string{"en": modelID}
+		}
+		models = append(models, info)
 	}
 	return &pb.ModelList{Models: models}, nil
 }
