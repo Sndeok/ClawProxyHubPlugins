@@ -34,6 +34,16 @@ var freeWhitelist = map[string]bool{
 	"cline-free/solar-pro4":                 true,
 }
 
+// freeLaneVerifiedShorts 上游免费通道「实测可用」的短名白名单。
+//
+// 免费通道不接受任意模型名：cline-free/glm-5.3、cline-free/glm-5.3-flash、
+// cline-free/gpt-6-astra、cline-free/grok-4.7、cline-free/qwen3.8-max、
+// cline-free/mimo-v2.5 等实测一律 404 {"error":"model not found"}。
+// 别名只能按这份名单生成，不能从 recommended / clinePass 整段推导。
+var freeLaneVerifiedShorts = map[string]bool{
+	"kimi-k3": true, // moonshotai/kimi-k3 的免费通道形式，实测可用
+}
+
 // ---------- 模型目录 ----------
 
 // ListModels 汇总对外可用模型：
@@ -75,10 +85,15 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 	for _, m := range cat.Free {
 		add(m.ID, m.Name, m.Description, "免费")
 	}
-	// 免费通道别名：短名取自精选与通行证清单（client 里可见的免费模型大多走这条）
+	// 免费通道别名：只对实测可用的短名生成（见 freeLaneVerifiedShorts 注释）。
+	// 官方 free 组里的模型本身就是 cline-free/<短名>，或带 provider 前缀的原 id
+	//（如 z-ai/glm-5.3-flash、poolside/laguna-s-2.1:free），原样暴露即可，不必再造别名。
 	for _, m := range append(append([]recommendedModel{}, cat.Recommended...), cat.ClinePass...) {
+		if !freeLaneVerifiedShorts[shortModelName(m.ID)] {
+			continue
+		}
 		if alias := freeChannelAlias(m.ID); alias != "" {
-			add(alias, alias, "免费通道（实验）：可用性取决于上游额度政策", "免费通道")
+			add(alias, alias, "免费通道（实测可用）：上游免费通道提供", "免费通道")
 		}
 	}
 	for _, m := range cat.ClinePass {
@@ -168,7 +183,14 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	if resp.StatusCode >= 400 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		detail := fmt.Sprintf("HTTP %d %s\n%s", resp.StatusCode, resp.Status, string(raw))
-		return stream.Send(failedDetail(mapUpstreamStatus(resp.StatusCode, string(raw)), fmt.Sprintf("HTTP %d: %s", resp.StatusCode, clip(string(raw), 300)), detail))
+		msg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, clip(string(raw), 300))
+		if resp.StatusCode == 404 {
+			// 上游不认识模型名：把「怎么改」直接写进错误里，别让用户猜
+			msg = fmt.Sprintf("上游不认识模型名 %q（HTTP 404 model not found）：免费通道只提供官方 free 清单里的模型。"+
+				"请改用官方目录里的原 id（moonshotai/kimi-k3、z-ai/glm-5.3-flash、cline-free/deepseek-v4.1-flash），"+
+				"或在插件设置 extra_models 里手动补充。", req.Model)
+		}
+		return stream.Send(failedDetail(mapUpstreamStatus(resp.StatusCode, string(raw)), msg, detail))
 	}
 
 	// 有效内容统计 + 延迟首发：上游免费通道存在「HTTP 200、全程只有 reasoning、
@@ -265,6 +287,8 @@ func mapUpstreamStatus(code int, body string) int32 {
 		return 401
 	case 402:
 		return 402
+	case 404:
+		return 404 // 上游不认识该模型名：别伪装成 502，按 404 展示
 	case 429:
 		return 429
 	case 403:

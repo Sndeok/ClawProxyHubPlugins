@@ -111,3 +111,45 @@ func TestParseExtraModels(t *testing.T) {
 		t.Error("空白输入应返回 nil")
 	}
 }
+
+// 回归：付费 / 通行证模型不得凭空生成 cline-free/<短名> 别名。
+// 实测 cline-free/glm-5.3、cline-free/gpt-6-astra、cline-free/qwen3.8-max、
+// cline-free/grok-4.7 等 14 个别名全部返回 404 {"error":"model not found"}；
+// 只有 freeLaneVerifiedShorts 里的短名（kimi-k3）实测可用。
+func TestListModelsDoesNotInventFreeAliases(t *testing.T) {
+	withClineUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case clineFreeListPath:
+			fmt.Fprint(w, `{
+			  "recommended":[{"id":"openai/gpt-6-astra","name":"gpt-6-astra"},{"id":"moonshotai/kimi-k3","name":"kimi-k3"}],
+			  "free":[{"id":"cline-free/deepseek-v4.1-flash","name":"Deepseek-v4.1-Flash"}],
+			  "clinePass":[{"id":"cline-pass/qwen3.8-max","name":"cline-pass/qwen3.8-max"}],
+			  "clineCloud":[]
+			}`)
+		case clineModelsPath:
+			fmt.Fprint(w, `{"data":[]}`)
+		}
+	})
+
+	p := &plugin{}
+	blob := &pb.CredentialBlob{Blob: []byte(`{"refresh_token":"rt-test"}`)}
+	ml, err := p.ListModels(context.Background(), blob)
+	if err != nil {
+		t.Fatalf("ListModels 报错: %v", err)
+	}
+	byID := map[string]*pb.ModelInfo{}
+	for _, m := range ml.Models {
+		byID[m.Id] = m
+	}
+	for _, id := range []string{"cline-free/gpt-6-astra", "cline-free/qwen3.8-max", "cline-free/glm-5.3"} {
+		if byID[id] != nil {
+			t.Errorf("不该生成免费通道别名 %s（上游 404 model not found）", id)
+		}
+	}
+	for _, id := range []string{"cline-free/kimi-k3", "cline-free/deepseek-v4.1-flash", "openai/gpt-6-astra", "cline-pass/qwen3.8-max"} {
+		if byID[id] == nil {
+			t.Errorf("模型列表缺少 %s", id)
+		}
+	}
+}
