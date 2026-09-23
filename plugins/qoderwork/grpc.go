@@ -331,7 +331,40 @@ func (p *plugin) grpcChatProbe(ctx context.Context, cred *accountCred, model str
 	for _, a := range attempts {
 		out = append(out, a.label+" → "+p.grpcChatOnce(ctx, cred, sess, a.body, a.sign, model))
 	}
+	// JSON 形态的两条候选路径（CLI 的 HTTP 降级通道是 `/model/v1/chat/completions`，
+	// 另外补打一条 OpenAI 兼容路径），带真签名，用来区分「路径不存在」和「协议不对」。
+	jsonBody := fmt.Sprintf(
+		`{"model":%q,"stream":true,"messages":[{"role":"user","content":"只回答两个字符：OK"}]}`, model)
+	out = append(out, "POST /model/v1/chat/completions → "+p.rawPathProbe(ctx, cred, sess, "/model/v1/chat/completions", jsonBody))
+	out = append(out, "POST /v1/chat/completions → "+p.rawPathProbe(ctx, cred, sess, "/v1/chat/completions", jsonBody))
+	out = append(out, "POST /model.chat.ChatService/ChatCompletion（unary） → "+p.rawPathProbe(ctx, cred, sess, "/model.chat.ChatService/ChatCompletion", string(framed)))
+
 	return strings.Join(out, " ｜ ")
+}
+
+// rawPathProbe 打一条候选路径，返回「HTTP 状态 / content-type / 长度 / 前 120 字节」。
+func (p *plugin) rawPathProbe(ctx context.Context, cred *accountCred, sess *qodersign.Session, path, body string) string {
+	req, err := http.NewRequestWithContext(ctx, "POST", p.gatewayBaseURL()+path, strings.NewReader(body))
+	if err != nil {
+		return "建请求失败: " + err.Error()
+	}
+	if err := sess.ApplyHeaders(req, p.headerCfg(), body, cred.UID, ""); err != nil {
+		return "签名失败: " + err.Error()
+	}
+	resp, err := p.grpcHTTPClient(cred).Do(req)
+	if err != nil {
+		return "请求失败: " + err.Error()
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	r := fmt.Sprintf("HTTP %d proto=%s ct=%s len=%d", resp.StatusCode, resp.Proto, resp.Header.Get("content-type"), len(raw))
+	if gt := resp.Trailer.Get("grpc-status"); gt != "" {
+		r += " grpc-status=" + gt + " grpc-message=" + resp.Trailer.Get("grpc-message")
+	}
+	if len(raw) > 0 {
+		r += " body=" + clip(strings.TrimSpace(string(raw)), 120)
+	}
+	return r
 }
 
 // grpcChatOnce 发一次请求，返回 HTTP 状态 + trailer grpc-status + 首个分片摘要。
