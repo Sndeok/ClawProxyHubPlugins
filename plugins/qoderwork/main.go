@@ -283,6 +283,11 @@ func (p *plugin) profileFor(ctx context.Context, cred *accountCred) *pb.AccountP
 	if plan, err := p.fetchPlan(ctx, client, cred.DT); err == nil {
 		prof.Sections = append(prof.Sections, planSection(plan))
 	}
+	// 诊断通道：插件设置 grpc_probe=<模型 key> 时，用真令牌打一次
+	// model.chat.ChatService gRPC 通道，把原始响应挂成资料块（账号详情页可见）。
+	if probe := p.settingStr("grpc_probe", ""); probe != "" {
+		prof.Sections = append(prof.Sections, sectionNote("grpc_probe", "gRPC 通道探针", p.grpcChatProbe(ctx, cred, probe)))
+	}
 	return prof
 }
 
