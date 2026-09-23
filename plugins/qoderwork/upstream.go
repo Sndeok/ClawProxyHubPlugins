@@ -29,7 +29,7 @@ const (
 	defaultTimeout = 180 * time.Second
 
 	// 客户端 ClientMetadata 默认值（qoder-auth-wasm 常量，可用插件设置覆盖）
-	defaultClientType   = "6"          // S1t
+	defaultClientType   = "5"          // 实测：6 会被上游拒（403 code=112），5 + qoder_work 才通
 	defaultProduct      = "qoder_work" // Yqe
 	defaultBusinessType = "agent"      // b1t
 	defaultScene        = "assistant"  // P1t
