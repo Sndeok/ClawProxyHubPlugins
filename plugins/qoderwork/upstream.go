@@ -22,7 +22,8 @@ import (
 // QoderWork（CN）上游端点（逐步与参考实现核对）。
 const (
 	regionCN       = "cn"
-	modelsPath     = "/algo/api/v2/model/list?Encode=1"
+	modelsPath     = "/api/v2/model/list?Encode=1"      // 模型服务真实路径（无 /algo 前缀）
+	modelsPathOld  = "/algo/api/v2/model/list?Encode=1" // 旧前缀：Qoder 网关等价，qwenworkcn 上会 503
 	chatPath       = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 	cosyVersion    = "0.1.43"
 	cosyClientIP   = "169.254.198.161"

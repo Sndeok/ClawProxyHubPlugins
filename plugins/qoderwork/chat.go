@@ -96,8 +96,14 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 
 // fetchModels COSY 签名 GET 模型目录（优先 qwork 场景，其次 chat 场景，仅启用项）。
 //
-// QwenWork 客户端用的是 auth.getModels({scene:"qwork"})，键形如 qwork-auto/qwork-ultimate；
-// chat 场景是 Qoder CLI 的清单（dmodel/gmodel/...）。
+// 路径来自千问办公自带的 Qoder CLI（resources\bin\qoderclicn.exe）里的真实实现：
+//
+//	/api/v2/model/list?Encode=1       ← 模型服务真实路径
+//	/algo/api/v2/model/list?Encode=1  ← 旧前缀；两套签名一致（签名走的是去掉 /algo 的路径），
+//	                                    但对 qwenworkcn 上游会返回
+//	                                    503 {"code":"503","message":"Model catalog unavailable"}
+//
+// 所以按顺序各试一次：新路径优先，失败回退旧路径，Qoder / 千问办公两套部署都能用。
 func (p *plugin) fetchModels(ctx context.Context, cred *accountCred) ([]dynamicModel, error) {
 	if err := p.fillFingerprint(cred); err != nil {
 		return nil, err
@@ -109,13 +115,44 @@ func (p *plugin) fetchModels(ctx context.Context, cred *accountCred) ([]dynamicM
 	if err != nil {
 		return nil, err
 	}
-	rawURL := p.gatewayBaseURL() + modelsPath
-	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+	paths := []string{p.settingStr("models_path", modelsPath)}
+	if modelsPathOld != paths[0] {
+		paths = append(paths, modelsPathOld)
+	}
+	var firstErr error
+	for _, path := range paths {
+		models, err := p.fetchModelsAt(ctx, cred, sess, path)
+		if err == nil {
+			if p.host != nil {
+				p.host.Log("info", "模型目录来自 "+path)
+			}
+			return models, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if p.host != nil {
+			p.host.Log("warn", "模型目录 "+path+" 失败："+err.Error())
+		}
+	}
+	return nil, firstErr
+}
+
+// fetchModelsAt 单次取目录 + 解析（scene 优先 qwork，其次 chat，只取启用项）。
+func (p *plugin) fetchModelsAt(ctx context.Context, cred *accountCred, sess *qodersign.Session, path string) ([]dynamicModel, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", p.gatewayBaseURL()+path, nil)
 	if err != nil {
 		return nil, err
 	}
 	if err := sess.ApplyHeaders(req, p.headerCfg(), "", cred.UID, ""); err != nil {
 		return nil, err
+	}
+	// 千问办公客户端对网关 REST 请求都会带这组 X-QwenWork-* 头；
+	// 只补这几个，不动 COSY 已设好的 Accept / User-Agent。
+	for k, v := range p.qwenWorkClientHeaders() {
+		if strings.HasPrefix(strings.ToLower(k), "x-qwenwork-") {
+			req.Header.Set(k, v)
+		}
 	}
 	resp, err := p.httpClient(cred).Do(req)
 	if err != nil {
