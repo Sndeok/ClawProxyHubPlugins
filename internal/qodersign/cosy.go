@@ -95,9 +95,10 @@ func NewSession(id Identity, machineID, machineToken, machineType string) (*Sess
 // HeaderConfig 不同产品的 COSY 版本号与附加头。
 type HeaderConfig struct {
 	CosyVersion  string            // 上游 cosy-version（Qoder 1.0.10 / QoderWork 0.1.43）
-	Scene        string            // cosy-scene，空则不发送（QoderWork 不带）
-	Product      string            // cosy-business-product
-	BusinessType string            // cosy-business-type
+	Scene        string            // cosy-scene（客户端 ClientMetadata.scene）
+	Product      string            // cosy-business-product（客户端 ClientMetadata.business_product）
+	BusinessType string            // cosy-business-type（客户端 ClientMetadata.business_type）
+	ClientType   string            // cosy-clienttype（客户端 ClientMetadata.client_type；空=5）
 	ClientIP     string            // cosy-clientip，空则不发送
 	DataPolicy   string            // cosy-data-policy（Qoder: agree / QoderWork: AGREE）
 	Extra        map[string]string // 其它固定头
@@ -138,7 +139,7 @@ func (s *Session) ApplyHeaders(req *http.Request, cfg HeaderConfig, body, uid, m
 	h.Set("cosy-machinetype", s.MachineType)
 	h.Set("cosy-machineid", s.MachineID)
 	h.Set("cosy-machinetoken", s.MachineToken)
-	h.Set("cosy-clienttype", "5")
+	h.Set("cosy-clienttype", orDefault(cfg.ClientType, "5"))
 	h.Set("cosy-version", orDefault(cfg.CosyVersion, "1.0.10"))
 	h.Set("login-version", "v2")
 	h.Set("accept", "text/event-stream")

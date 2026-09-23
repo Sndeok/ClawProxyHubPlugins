@@ -93,7 +93,10 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 	return &pb.ModelList{Models: out}, nil
 }
 
-// fetchModels COSY 签名 GET 模型目录（chat scene，仅启用项）。
+// fetchModels COSY 签名 GET 模型目录（优先 qwork 场景，其次 chat 场景，仅启用项）。
+//
+// QwenWork 客户端用的是 auth.getModels({scene:"qwork"})，键形如 qwork-auto/qwork-ultimate；
+// chat 场景是 Qoder CLI 的清单（dmodel/gmodel/...）。
 func (p *plugin) fetchModels(ctx context.Context, cred *accountCred) ([]dynamicModel, error) {
 	if err := p.fillFingerprint(cred); err != nil {
 		return nil, err
@@ -126,13 +129,27 @@ func (p *plugin) fetchModels(ctx context.Context, cred *accountCred) ([]dynamicM
 	if err := json.Unmarshal(raw, &top); err != nil {
 		return nil, fmt.Errorf("模型目录解析失败: %w", err)
 	}
-	chatRaw, ok := top["chat"]
-	if !ok {
-		return nil, fmt.Errorf("模型目录缺少 chat scene")
-	}
+	scene := ""
 	var models []dynamicModel
-	if err := json.Unmarshal(chatRaw, &models); err != nil {
-		return nil, fmt.Errorf("chat scene 解析失败: %w", err)
+	for _, name := range []string{"qwork", "chat"} {
+		rawScene, ok := top[name]
+		if !ok {
+			continue
+		}
+		var parsed []dynamicModel
+		if json.Unmarshal(rawScene, &parsed) != nil || len(parsed) == 0 {
+			continue
+		}
+		scene, models = name, parsed
+		break
+	}
+	if scene == "" {
+		scenes := make([]string, 0, len(top))
+		for k := range top {
+			scenes = append(scenes, k)
+		}
+		sort.Strings(scenes)
+		return nil, fmt.Errorf("模型目录缺少 qwork/chat 场景（上游返回场景: %s）", strings.Join(scenes, ","))
 	}
 	enabled := make([]dynamicModel, 0, len(models))
 	for _, m := range models {
@@ -141,7 +158,7 @@ func (p *plugin) fetchModels(ctx context.Context, cred *accountCred) ([]dynamicM
 		}
 	}
 	if len(enabled) == 0 {
-		return nil, fmt.Errorf("上游没有启用的 chat 模型")
+		return nil, fmt.Errorf("上游没有启用的 %s 模型", scene)
 	}
 	sort.SliceStable(enabled, func(i, j int) bool { return enabled[i].Key < enabled[j].Key })
 	return enabled, nil

@@ -29,12 +29,24 @@ const (
 	defaultTimeout = 180 * time.Second
 )
 
-// headerCfg QoderWork 的 COSY 头配置。
+// headerCfg QoderWork（千问办公）的 COSY 头配置。
+//
+// 该产品的客户端把 ClientMetadata 一并发给上游，取值来自 qoder-auth-wasm 里的常量：
+//
+//	nxe="5" / S1t="6"（client_type）、D1t="cli" / Yqe="qoder_work"（business_product）、
+//	b1t="agent"（business_type）、P1t="assistant"（scene）
+//
+// 之前只发 CLI 默认值（不带 product），上游按 CLI 处理，结果就是 x-model-key 被忽略、
+// 无论选哪个模型都回默认的 Qwen3.5。
 func headerCfg() qodersign.HeaderConfig {
 	return qodersign.HeaderConfig{
-		CosyVersion: cosyVersion,
-		ClientIP:    cosyClientIP,
-		DataPolicy:  "AGREE",
+		CosyVersion:  cosyVersion,
+		ClientIP:     cosyClientIP,
+		DataPolicy:   "AGREE",
+		ClientType:   "6",          // = S1t（qoder_work 产品）
+		Product:      "qoder_work", // = Yqe
+		BusinessType: "agent",      // = b1t
+		Scene:        "assistant",  // = P1t
 	}
 }
 
