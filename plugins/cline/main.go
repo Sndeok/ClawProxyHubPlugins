@@ -113,6 +113,12 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 					"description": "串行保护命中时的两次上游请求间隔；留空 = 800",
 					"default": "800"
 				},
+				"first_event_grace": {
+					"type": "string",
+					"title": "首字兜底时限",
+					"description": "上游长时间只思考不吐正文时，先发一个开始事件把流立起来，避免被 new-api / 网关判成「上游无事件」。支持 8s / 500ms；留空 = 8s",
+					"default": "8s"
+				},
 				"client_version": {
 					"type": "string",
 					"title": "客户端版本（伪装）",

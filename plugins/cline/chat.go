@@ -20,6 +20,18 @@ import (
 	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
+// defaultFirstEventGrace 首字兜底默认时限；见 Chat 里的说明。
+const defaultFirstEventGrace = 8 * time.Second
+
+// firstEventGrace 首字兜底时限（插件设置 first_event_grace，支持 8s / 500ms / 8）。
+func (p *plugin) firstEventGrace() time.Duration {
+	d, err := time.ParseDuration(p.settingStr("first_event_grace", defaultFirstEventGrace.String()))
+	if err != nil || d <= 0 {
+		return defaultFirstEventGrace
+	}
+	return d
+}
+
 // freeWhitelist 官方免费白名单（参考实现逐条核对；上游目录里不带 :free 后缀但也免费）。
 var freeWhitelist = map[string]bool{
 	"deepseek/deepseek-v4-flash":            true,
@@ -283,14 +295,46 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		_ = stream.Send(ev)
 	}
 	parser := openaiup.NewParser(emit)
+
+	// 读上游放独立 goroutine，主 goroutine 只做「消费 + 定时兜底」：
+	// 这样所有 stream.Send 仍在同一个 goroutine（gRPC 流不允许并发 Send）。
 	sc := bufio.NewScanner(unwrapReader(resp.Body))
 	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		parser.Feed(sc.Text())
+	lines := make(chan string, 256)
+	scanErr := make(chan error, 1)
+	go func() {
+		defer close(lines)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+		scanErr <- sc.Err()
+	}()
+
+	// 首字兜底：免费通道的推理模型可能几十秒只思考不吐 content，期间一个事件都不发，
+	// 会被 new-api / 网关判成「上游无事件」（典型报文：upstream produced no events within 1m30s）。
+	// 到点先发 MessageStart 把流立起来；在这之前若上游快速判空，仍以失败作为首事件，
+	// 保留「核心按 429 暂停该账号并换号重试」的行为。
+	grace := time.NewTimer(p.firstEventGrace())
+	defer grace.Stop()
+	drained := false
+	for !drained {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				drained = true
+				continue
+			}
+			parser.Feed(line)
+		case <-grace.C:
+			ensureStart()
+		}
 	}
-	if err := sc.Err(); err != nil {
+	if err := <-scanErr; err != nil {
 		// 已被截断：若还没发过任何内容，可换号重试；否则只能如实上报中断
-		return stream.Send(failed(502, "上游流中断（无有效内容）: "+err.Error()))
+		if contentDeltas == 0 && toolDeltas == 0 {
+			return stream.Send(failed(502, "上游流中断（无有效内容）: "+err.Error()))
+		}
+		return stream.Send(failed(502, "上游流中断: "+err.Error()))
 	}
 	if contentDeltas == 0 && toolDeltas == 0 {
 		return stream.Send(failed(429, "上游返回空内容（免费通道并发/参数风控）：已暂停该账号并换号重试"))
