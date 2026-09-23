@@ -27,6 +27,12 @@ const (
 	cosyVersion    = "0.1.43"
 	cosyClientIP   = "169.254.198.161"
 	defaultTimeout = 180 * time.Second
+
+	// 客户端 ClientMetadata 默认值（qoder-auth-wasm 常量，可用插件设置覆盖）
+	defaultClientType   = "6"          // S1t
+	defaultProduct      = "qoder_work" // Yqe
+	defaultBusinessType = "agent"      // b1t
+	defaultScene        = "assistant"  // P1t
 )
 
 // headerCfg QoderWork（千问办公）的 COSY 头配置。
@@ -38,15 +44,15 @@ const (
 //
 // 之前只发 CLI 默认值（不带 product），上游按 CLI 处理，结果就是 x-model-key 被忽略、
 // 无论选哪个模型都回默认的 Qwen3.5。
-func headerCfg() qodersign.HeaderConfig {
+func (p *plugin) headerCfg() qodersign.HeaderConfig {
 	return qodersign.HeaderConfig{
-		CosyVersion:  cosyVersion,
-		ClientIP:     cosyClientIP,
+		CosyVersion:  p.settingStr("cosy_version", cosyVersion),
+		ClientIP:     p.settingStr("cosy_client_ip", cosyClientIP),
 		DataPolicy:   "AGREE",
-		ClientType:   "6",          // = S1t（qoder_work 产品）
-		Product:      "qoder_work", // = Yqe
-		BusinessType: "agent",      // = b1t
-		Scene:        "assistant",  // = P1t
+		ClientType:   p.settingStr("cosy_client_type", defaultClientType),
+		Product:      p.settingStr("cosy_business_product", defaultProduct),
+		BusinessType: p.settingStr("cosy_business_type", defaultBusinessType),
+		Scene:        p.settingStr("cosy_scene", defaultScene),
 	}
 }
 
@@ -369,6 +375,14 @@ func (p *plugin) fillFingerprint(c *accountCred) error {
 // machineSalt 插件设置里的本机盐（空 = 与参考实现同构）。
 func (p *plugin) machineSalt() string {
 	return strings.TrimSpace(str(p.settings()["machine_salt"]))
+}
+
+// settingStr 读插件设置里的字符串（空值回落默认）。
+func (p *plugin) settingStr(key, def string) string {
+	if v := strings.TrimSpace(str(p.settings()[key])); v != "" {
+		return v
+	}
+	return def
 }
 
 // settings 读插件设置（核心侧保存后即时生效；失败返回空表）。

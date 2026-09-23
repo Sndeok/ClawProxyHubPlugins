@@ -113,7 +113,7 @@ func (p *plugin) fetchModels(ctx context.Context, cred *accountCred) ([]dynamicM
 	if err != nil {
 		return nil, err
 	}
-	if err := sess.ApplyHeaders(req, headerCfg(), "", cred.UID, ""); err != nil {
+	if err := sess.ApplyHeaders(req, p.headerCfg(), "", cred.UID, ""); err != nil {
 		return nil, err
 	}
 	resp, err := p.httpClient(cred).Do(req)
@@ -228,7 +228,7 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	if err != nil {
 		return stream.Send(failed(500, err.Error()))
 	}
-	if err := sess.ApplyHeaders(httpReq, headerCfg(), encoded, cred.UID, modelKey); err != nil {
+	if err := sess.ApplyHeaders(httpReq, p.headerCfg(), encoded, cred.UID, modelKey); err != nil {
 		return stream.Send(failed(500, err.Error()))
 	}
 	// 流式必须 identity：gzip 会把 SSE 缓冲成一次性下发（打字机效果消失）
