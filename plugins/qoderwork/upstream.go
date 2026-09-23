@@ -52,6 +52,11 @@ const (
 // openapiBase 业务 OpenAPI 基址（测试里可替换为 httptest 地址）。
 var openapiBase = "https://openapi.qoder.com.cn"
 
+// adapterBase 千问办公（qwenworkcn）网关：/api/v1/adapter/** 这类「客户端专属」接口
+// 只在 gateway.qwenwork.cn 上有（实测 openapi.qoder.com.cn 对同一路径返回 404 NotFound）；
+// 对端未鉴权时返回 401 INVALID_TOKEN，说明路由存在。可用插件设置 adapter_base 覆盖。
+var adapterBase = "https://gateway.qwenwork.cn"
+
 // headerCfg QoderWork（千问办公）的 COSY 头配置。
 //
 // 该产品的客户端把 ClientMetadata 一并发给上游，取值来自 qoder-auth-wasm 里的常量：
@@ -258,7 +263,8 @@ func (p *plugin) qwenWorkClientHeaders() map[string]string {
 }
 
 func (p *plugin) fetchWallets(ctx context.Context, client *http.Client, dt string) (*walletBalances, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", openapiBase+"/api/v1/adapter/user/wallets", nil)
+	base := p.settingStr("adapter_base", adapterBase)
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(base, "/")+"/api/v1/adapter/user/wallets", nil)
 	if err != nil {
 		return nil, err
 	}

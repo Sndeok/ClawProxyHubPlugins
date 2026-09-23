@@ -203,9 +203,9 @@ func TestFetchWalletsUsesClientEndpoint(t *testing.T) {
 		}}`)
 	}))
 	defer srv.Close()
-	old := openapiBase
-	openapiBase = srv.URL
-	defer func() { openapiBase = old }()
+	oldAdapter, oldOpenapi := adapterBase, openapiBase
+	adapterBase, openapiBase = srv.URL, srv.URL
+	defer func() { adapterBase, openapiBase = oldAdapter, oldOpenapi }()
 
 	w, err := (&plugin{}).fetchWallets(context.Background(), srv.Client(), "dt-test")
 	if err != nil {
