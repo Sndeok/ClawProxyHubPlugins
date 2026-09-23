@@ -73,15 +73,15 @@
   },
   {
     "name": "qoderwork",
-    "version": "0.1.10",
+    "version": "0.1.11",
     "author": "cph",
     "label": {
       "en": "QoderWork",
       "zh": "QoderWork"
     },
     "published_at": "2026-09-23",
-    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/qoderwork-v0.1.10/qoderwork-0.1.10.cphplugin",
-    "sha256": "253763838b3318a7d115b40a649a050c45fb13bf4490f172c10994f5d3dfe9ca"
+    "download_url": "https://github.com/Sndeok/ClawProxyHubPlugins/releases/download/qoderwork-v0.1.11/qoderwork-0.1.11.cphplugin",
+    "sha256": "2b4289e6f8d0a84fd1c12e329a65f5a4fb9c5a5865d1cfd11f145406dc1ef03e"
   },
   {
     "name": "workbuddy",
