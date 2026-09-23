@@ -86,6 +86,13 @@ func (p *plugin) Handshake(ctx context.Context, req *pb.HandshakeRequest) (*pb.H
 		SettingsSchema: `{
 			"type": "object",
 			"properties": {
+				"catalog_scope": {
+					"type": "string",
+					"title": "模型目录范围",
+					"description": "free（默认）= 只列免费渠道，与 Cline 客户端默认只拉 free 一致；pass = 免费 + ClinePass 订阅款；all = 再加官方推荐与云通道",
+					"enum": ["free", "pass", "all"],
+					"default": "free"
+				},
 				"reasoning_effort": {
 					"type": "string",
 					"title": "推理强度",

@@ -74,7 +74,11 @@ func TestListModelsExposesAllChannels(t *testing.T) {
 
 	p := &plugin{}
 	blob := &pb.CredentialBlob{Blob: []byte(`{"refresh_token":"rt-test"}`)}
-	ml, err := p.ListModels(context.Background(), blob)
+	cred, cerr := credFrom(blob)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	ml, err := p.listModelsWithScope(context.Background(), cred, "all")
 	if err != nil {
 		t.Fatalf("ListModels 报错: %v", err)
 	}
@@ -157,7 +161,11 @@ func TestListModelsDoesNotInventFreeAliases(t *testing.T) {
 
 	p := &plugin{}
 	blob := &pb.CredentialBlob{Blob: []byte(`{"refresh_token":"rt-test"}`)}
-	ml, err := p.ListModels(context.Background(), blob)
+	cred, cerr := credFrom(blob)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	ml, err := p.listModelsWithScope(context.Background(), cred, "all")
 	if err != nil {
 		t.Fatalf("ListModels 报错: %v", err)
 	}
@@ -173,6 +181,64 @@ func TestListModelsDoesNotInventFreeAliases(t *testing.T) {
 	for _, id := range []string{"cline-free/kimi-k3", "cline-free/deepseek-v4.1-flash", "openai/gpt-6-astra", "cline-pass/qwen3.8-max"} {
 		if byID[id] == nil {
 			t.Errorf("模型列表缺少 %s", id)
+		}
+	}
+}
+
+// TestListModelsFreeScopeDefault 默认（catalog_scope=free）只列免费渠道：
+// 与 Cline 客户端默认只拉 free 的行为一致，不再把订阅款/云通道/付费推荐混进来。
+func TestListModelsFreeScope(t *testing.T) {
+	withClineUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case clineFreeListPath:
+			fmt.Fprint(w, `{
+			  "recommended":[{"id":"openai/gpt-6-astra","name":"gpt-6-astra"},{"id":"moonshotai/kimi-k3","name":"kimi-k3"}],
+			  "free":[{"id":"cline-free/deepseek-v4.1-flash","name":"Deepseek-v4.1-Flash"}],
+			  "clinePass":[{"id":"cline-pass/qwen3.8-max","name":"cline-pass/qwen3.8-max"}],
+			  "clineCloud":[{"id":"cline-cloud/kimi-k3","name":"cline-cloud/kimi-k3"}]
+			}`)
+		case clineModelsPath:
+			fmt.Fprint(w, `{"data":[{"id":"z-ai/glm-5.2:free"},{"id":"some/model"}]}`)
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":"Unauthorized"}`)
+		}
+	})
+
+	p := &plugin{}
+	blob := &pb.CredentialBlob{Blob: []byte(`{"refresh_token":"rt-test"}`)}
+	cred, err := credFrom(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ml, err := p.listModelsWithScope(context.Background(), cred, normalizeCatalogScope(""))
+	if err != nil {
+		t.Fatalf("ListModels 报错: %v", err)
+	}
+	got := map[string]bool{}
+	for _, m := range ml.Models {
+		got[m.Id] = true
+	}
+	for _, id := range []string{"cline-free/deepseek-v4.1-flash", "cline-free/kimi-k3", "z-ai/glm-5.2:free"} {
+		if !got[id] {
+			t.Errorf("免费范围应包含 %s（实际 %d 个）", id, len(ml.Models))
+		}
+	}
+	for _, id := range []string{"openai/gpt-6-astra", "cline-pass/qwen3.8-max", "cline-cloud/kimi-k3", "some/model"} {
+		if got[id] {
+			t.Errorf("免费范围不该包含 %s", id)
+		}
+	}
+}
+
+// TestNormalizeCatalogScope 取值归一化：非法值回落 free。
+func TestNormalizeCatalogScope(t *testing.T) {
+	cases := map[string]string{"": "free", "free": "free", "FREE": "free", "pass": "pass",
+		"cline-pass": "pass", "all": "all", "everything": "free"}
+	for in, want := range cases {
+		if got := normalizeCatalogScope(in); got != want {
+			t.Errorf("normalizeCatalogScope(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

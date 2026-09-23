@@ -67,6 +67,30 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	return p.listModelsWithScope(ctx, cred, p.catalogScope())
+}
+
+// catalogScope 模型目录范围（插件设置 catalog_scope）：
+//   free（默认）= 只给免费渠道，和 Cline 客户端默认只拉 free 的行为一致
+//   pass        = 免费 + ClinePass 订阅款
+//   all         = 再加官方推荐与云通道（客户端已无云通道 provider）
+func (p *plugin) catalogScope() string {
+	return normalizeCatalogScope(p.settingStr("catalog_scope", "free"))
+}
+
+// normalizeCatalogScope 归一化取值，非法值一律回落 free。
+func normalizeCatalogScope(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "all":
+		return "all"
+	case "pass", "clinepass", "cline-pass":
+		return "pass"
+	}
+	return "free"
+}
+
+// listModelsWithScope 按给定范围汇总模型目录（scope 见 catalogScope）。
+func (p *plugin) listModelsWithScope(ctx context.Context, cred *clineCred, scope string) (*pb.ModelList, error) {
 	client := p.httpClient(cred)
 	cat, err := fetchRecommended(ctx, client)
 	if err != nil {
@@ -88,36 +112,40 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 	}
 	// Cline 客户端只有两个 provider：Cline Usage-Billing（按量计费）与 ClinePass（订阅+免费档）。
 	// 模型列表按这两个通道打标签，插件里看到的和客户端里选到的对得上。
-	for _, m := range cat.Recommended {
-		add(m.ID, m.Name, m.Description, "推荐", laneUsage)
+	if scope == "all" {
+		for _, m := range cat.Recommended {
+			add(m.ID, m.Name, m.Description, "推荐", laneUsage)
+		}
 	}
 	for _, m := range cat.Free {
 		add(m.ID, m.Name, m.Description, "免费", laneUsage)
 	}
-	// ClinePass：以「账号可用清单」为准（客户端 ClinePass 下能选到的模型就来自它，
-	// 含 Kimi K3 (free) 这类免费档）；拉不到时退回官方 clinePass 组 + 实测可用别名。
-	// 清单接口同样吃 accessToken：先按需刷新，避免用过期 token 拿到 401
-	if accessTokenExpiring(cred) {
-		_, _ = refreshClineToken(ctx, client, cred)
-	}
-	passModels, passStatus, passErr := p.fetchClinePassModels(ctx, client, cred)
-	if passErr == nil && len(passModels) > 0 {
-		for _, m := range passModels {
-			tags := []string{"ClinePass"}
-			if strings.HasPrefix(m.ID, "cline-free/") {
-				tags = append(tags, "免费档")
+	if scope != "free" {
+		// ClinePass：以「账号可用清单」为准（客户端 ClinePass 下能选到的模型就来自它，
+		// 含 Kimi K3 (free) 这类免费档）；拉不到时退回官方 clinePass 组 + 实测可用别名。
+		// 清单接口同样吃 accessToken：先按需刷新，避免用过期 token 拿到 401
+		if accessTokenExpiring(cred) {
+			_, _ = refreshClineToken(ctx, client, cred)
+		}
+		passModels, passStatus, passErr := p.fetchClinePassModels(ctx, client, cred)
+		if passErr == nil && len(passModels) > 0 {
+			for _, m := range passModels {
+				tags := []string{"ClinePass"}
+				if strings.HasPrefix(m.ID, "cline-free/") {
+					tags = append(tags, "免费档")
+				}
+				add(m.ID, m.Name, m.Description, tags...)
 			}
-			add(m.ID, m.Name, m.Description, tags...)
-		}
-	} else {
-		// 账号清单没取到（本账号实测 HTTP 404/401）时退回官方 clinePass 组：
-		// 标签只保留通行证 + ClinePass，原因写进 Description，避免模型列表里满屏「未同步」
-		passNote := "订阅款需 ClinePass 权限"
-		if passErr != nil {
-			passNote = fmt.Sprintf("账号级 ClinePass 清单未取到（HTTP %d）：%s", passStatus, clip(passErr.Error(), 160))
-		}
-		for _, m := range cat.ClinePass {
-			add(m.ID, m.Name, strings.TrimSpace(orDefault(m.Description, "")+"（"+passNote+"）"), "通行证", lanePass)
+		} else {
+			// 账号清单没取到（本账号实测 HTTP 404/401）时退回官方 clinePass 组：
+			// 标签只保留通行证 + ClinePass，原因写进 Description，避免模型列表里满屏「未同步」
+			passNote := "订阅款需 ClinePass 权限"
+			if passErr != nil {
+				passNote = fmt.Sprintf("账号级 ClinePass 清单未取到（HTTP %d）：%s", passStatus, clip(passErr.Error(), 160))
+			}
+			for _, m := range cat.ClinePass {
+				add(m.ID, m.Name, strings.TrimSpace(orDefault(m.Description, "")+"（"+passNote+"）"), "通行证", lanePass)
+			}
 		}
 	}
 	// 实测可用的 ClinePass 免费档别名（账号清单拉不到时的兜底）
@@ -129,8 +157,10 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 			add(alias, alias, "ClinePass 免费档（实测可用）", "ClinePass", "免费档")
 		}
 	}
-	for _, m := range cat.ClineCloud {
-		add(m.ID, m.Name, m.Description, "云通道", laneCloud)
+	if scope == "all" {
+		for _, m := range cat.ClineCloud {
+			add(m.ID, m.Name, m.Description, "云通道", laneCloud)
+		}
 	}
 	if all, err := fetchModels(ctx, client); err == nil {
 		for _, m := range all {
