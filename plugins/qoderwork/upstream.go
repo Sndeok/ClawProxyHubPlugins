@@ -352,6 +352,31 @@ func (p *plugin) fetchWallets(ctx context.Context, client *http.Client, dt strin
 }
 
 // numField 从 map 里按候选键取数字（兼容 snake_case / camelCase 与字符串数字）。
+// applyContextQuota 从 account-context 的 quota / user_quota 段补额度（键名在各产品间不一致，
+// 取不到就保持 0；积分展示主要靠 wallets）。
+func applyContextQuota(q *quotaInfo, env map[string]interface{}) {
+	pick := func(m map[string]interface{}, keys ...string) (float64, bool) { return numField(m, keys...) }
+	quota, _ := env["quota"].(map[string]interface{})
+	if quota == nil {
+		quota, _ = env["user_quota"].(map[string]interface{})
+	}
+	if quota == nil {
+		quota = env
+	}
+	if v, ok := pick(quota, "total", "total_credits", "totalCredits"); ok {
+		q.UserTotal = v
+	}
+	if v, ok := pick(quota, "used", "used_credits", "usedCredits"); ok {
+		q.UserUsed = v
+	}
+	if v, ok := pick(quota, "remaining", "remaining_credits", "remainingCredits", "balance"); ok {
+		q.UserRemaining = v
+	}
+	if q.UserRemaining == 0 && q.UserTotal > 0 {
+		q.UserRemaining = q.UserTotal - q.UserUsed
+	}
+}
+
 func numField(m map[string]interface{}, keys ...string) (float64, bool) {
 	for _, k := range keys {
 		switch v := m[k].(type) {

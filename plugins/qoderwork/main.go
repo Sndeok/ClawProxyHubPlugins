@@ -239,21 +239,35 @@ func (p *plugin) profileFor(ctx context.Context, cred *accountCred) *pb.AccountP
 		Quota:       map[string]string{},
 	}
 	client := p.httpClient(cred)
-	q, err := p.fetchQuota(ctx, client, cred.DT)
-	if err != nil {
-		prof.Healthy = false
-		prof.Sections = append(prof.Sections, sectionNote("quota_error", "额度查询失败", err.Error()))
-		return prof
+
+	// 额度：Qoder 账号走 /api/v2/quota/usage；千问办公个人账号走 account-context.quota。
+	// 两条都拿不到也只是展示缺额度，不能在拉钱包之前提前返回，否则积分会一直显示 0。
+	q, quotaErr := p.fetchQuota(ctx, client, cred.DT)
+	if q == nil {
+		q = &quotaInfo{}
 	}
+	if quotaErr != nil {
+		if env, cerr := p.accountContext(ctx, client, cred.DT); cerr == nil {
+			applyContextQuota(q, env)
+		}
+	}
+
 	// 客户端同源的「积分余额」（日/月/长期钱包）优先；失败不影响主流程
+	walletsErr := ""
 	if w, werr := p.fetchWallets(ctx, client, cred.DT); werr == nil {
 		q.Wallets = w
 	} else {
+		walletsErr = werr.Error()
 		// 退回 quota/usage，并把失败原因挂到资料块（/admin/accounts/{id}/detail 可见）
 		if p.host != nil {
 			p.host.Log("warn", "qoderwork wallets 拉取失败，退回 quota/usage: "+werr.Error())
 		}
 		prof.Sections = append(prof.Sections, sectionNote("wallets_error", "积分余额（钱包）拉取失败", werr.Error()))
+	}
+	if quotaErr != nil && walletsErr != "" {
+		prof.Healthy = false
+		prof.Sections = append(prof.Sections, sectionNote("quota_error", "额度查询失败", quotaErr.Error()))
+		return prof
 	}
 	prof.Quota["credits"] = fmt.Sprintf("%d", q.Remaining())
 	prof.Quota["total_credits"] = fmt.Sprintf("%d", q.Total())
