@@ -112,11 +112,13 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 	} else {
 		// 账号清单没取到时，把状态码打在标签上，方便一眼看出是 401 还是解析问题
 		missTag := "ClinePass 未同步"
-		if passStatus > 0 {
-			missTag = fmt.Sprintf("ClinePass 未同步:HTTP %d", passStatus)
+		// 兜底时把上游回包原文塞进 Description：模型列表 JSON 里能直接看到 404 的原因
+		passNote := "订阅款需 ClinePass 权限"
+		if passErr != nil {
+			passNote = fmt.Sprintf("ClinePass 账号清单未取到（HTTP %d）：%s", passStatus, clip(passErr.Error(), 200))
 		}
 		for _, m := range cat.ClinePass {
-			add(m.ID, m.Name, m.Description, "通行证", lanePass, missTag)
+			add(m.ID, m.Name, orDefault(m.Description, passNote), "通行证", lanePass, missTag)
 		}
 	}
 	// 实测可用的 ClinePass 免费档别名（账号清单拉不到时的兜底）
