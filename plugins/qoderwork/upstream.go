@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,7 +22,6 @@ import (
 // QoderWork（CN）上游端点（逐步与参考实现核对）。
 const (
 	regionCN       = "cn"
-	gatewayBase    = "https://gateway.qoder.com.cn"
 	modelsPath     = "/algo/api/v2/model/list?Encode=1"
 	chatPath       = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 	cosyVersion    = "0.1.43"
@@ -49,13 +49,39 @@ const (
 	defaultTaskID         = "common"     // task_id
 )
 
-// openapiBase 业务 OpenAPI 基址（测试里可替换为 httptest 地址）。
-var openapiBase = "https://openapi.qoder.com.cn"
+// 千问办公（qwenworkcn）网关。官方客户端把三件事都放在同一台主机上：
+//
+//	授权页       https://<website>/device/selectAccounts
+//	OpenAPI      https://<openapi>/api/v1/**（设备令牌、adapter 钱包、quota）
+//	模型 + 对话   https://<gateway>/algo/api/**（COSY 签名）
+//
+// 在 qwenworkcn 产品下 resolveWebsiteDomain() / resolveOpenApiDomain() /
+// resolveGatewayDomain() 三者取值相同，均为 gateway.qwenwork.cn。实测（2026-09-23）：
+//
+//	GET /device/selectAccounts?<真 PKCE + UUID nonce/machine_id> -> 302 到 qwenwork.cn/oauth2/auth
+//	GET /api/v1/adapter/user/wallets                            -> 401 INVALID_TOKEN（路由存在）
+//	GET /api/v2/quota/usage                                     -> 401 INVALID_TOKEN（路由存在）
+//	GET /algo/api/v2/model/list?Encode=1                        -> 403 Signature invalid（路由存在）
+//	GET /algo/api/v2/service/pro/sse/agent_chat_generation      -> 405（路由存在，需 POST）
+//
+// Qoder（qoder.com.cn / openapi.qoder.com.cn）是另一套账号体系，别混用。
+//
+// 这三个变量是默认值（测试里可整体替换成 httptest 地址）；插件设置
+// gateway_base / openapi_base / adapter_base 优先。
+var (
+	gatewayBase = "https://gateway.qwenwork.cn"
+	openapiBase = "https://gateway.qwenwork.cn"
+	adapterBase = "https://gateway.qwenwork.cn"
+)
 
-// adapterBase 千问办公（qwenworkcn）网关：/api/v1/adapter/** 这类「客户端专属」接口
-// 只在 gateway.qwenwork.cn 上有（实测 openapi.qoder.com.cn 对同一路径返回 404 NotFound）；
-// 对端未鉴权时返回 401 INVALID_TOKEN，说明路由存在。可用插件设置 adapter_base 覆盖。
-var adapterBase = "https://gateway.qwenwork.cn"
+// apiBase 插件设置优先、否则用默认端点（统一去掉尾部 /）。
+func (p *plugin) apiBase(key, fallback string) string {
+	return strings.TrimRight(p.settingStr(key, fallback), "/")
+}
+
+func (p *plugin) gatewayBaseURL() string { return p.apiBase("gateway_base", gatewayBase) }
+func (p *plugin) openapiBaseURL() string { return p.apiBase("openapi_base", openapiBase) }
+func (p *plugin) adapterBaseURL() string { return p.apiBase("adapter_base", adapterBase) }
 
 // headerCfg QoderWork（千问办公）的 COSY 头配置。
 //
@@ -205,12 +231,15 @@ func ftoa(f float64) string {
 	return strings.TrimSuffix(s, ".")
 }
 
-func fetchQuota(ctx context.Context, client *http.Client, dt string) (*quotaInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", openapiBase+"/api/v2/quota/usage", nil)
+func (p *plugin) fetchQuota(ctx context.Context, client *http.Client, dt string) (*quotaInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", p.openapiBaseURL()+"/api/v2/quota/usage", nil)
 	if err != nil {
 		return nil, err
 	}
 	authedJSON(req, dt)
+	for k, v := range p.qwenWorkClientHeaders() {
+		req.Header.Set(k, v)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -263,7 +292,7 @@ func (p *plugin) qwenWorkClientHeaders() map[string]string {
 }
 
 func (p *plugin) fetchWallets(ctx context.Context, client *http.Client, dt string) (*walletBalances, error) {
-	base := p.settingStr("adapter_base", adapterBase)
+	base := p.adapterBaseURL()
 	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(base, "/")+"/api/v1/adapter/user/wallets", nil)
 	if err != nil {
 		return nil, err
@@ -337,55 +366,91 @@ func numField(m map[string]interface{}, keys ...string) (float64, bool) {
 	return 0, false
 }
 
-// fetchUserInfo 取昵称与 uid（兼作令牌校验）。
-func fetchUserInfo(ctx context.Context, client *http.Client, dt string) (name, uid string, err error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", openapiBase+"/api/v1/userinfo", nil)
+// accountContext 取客户端同源的账号上下文：
+// GET /api/v1/adapter/user/account-context?include=user,plan,quota,page,data_sharing
+//
+// 千问办公没有 Qoder 的 /sash/api/v1/me（实测 404），昵称 / uid / 套餐都从这里取。
+// 响应形如 {code:0,data:{user:{...},plan:{...},quota:{...}}}，与客户端
+// unwrapAdapterResponse()（有 data 对象就取 data）保持一致。
+func (p *plugin) accountContext(ctx context.Context, client *http.Client, dt string) (map[string]interface{}, error) {
+	rawURL := p.openapiBaseURL() + "/api/v1/adapter/user/account-context?include=user,plan,quota,page,data_sharing"
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	authedJSON(req, dt)
+	for k, v := range p.qwenWorkClientHeaders() {
+		req.Header.Set(k, v)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return "", "", fmt.Errorf("userinfo HTTP %d: %s", resp.StatusCode, clip(string(raw), 200))
+		return nil, fmt.Errorf("account-context HTTP %d: %s", resp.StatusCode, clip(string(raw), 200))
 	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(raw, &m); err != nil {
+	body := raw
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err == nil {
+		if d, ok := top["data"]; ok && len(d) > 0 && d[0] == '{' {
+			body = d
+		}
+	}
+	var env map[string]interface{}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("account-context 解析失败: %w", err)
+	}
+	return env, nil
+}
+
+// fetchUserInfo 取昵称与 uid（兼作令牌校验）。
+func (p *plugin) fetchUserInfo(ctx context.Context, client *http.Client, dt string) (name, uid string, err error) {
+	env, err := p.accountContext(ctx, client, dt)
+	if err != nil {
 		return "", "", err
 	}
-	name = firstNonEmpty(str(m["name"]), str(m["nickname"]), str(m["username"]))
-	uid = firstNonEmpty(str(m["uid"]), str(m["user_id"]), str(m["userId"]), str(m["id"]))
+	user, _ := env["user"].(map[string]interface{})
+	if user == nil { // 兼容没有 user 包裹的返回
+		user = env
+	}
+	name = firstNonEmpty(str(user["name"]), str(user["nickname"]), str(user["display_name"]),
+		str(user["displayName"]), str(user["username"]), str(user["email"]))
+	uid = firstNonEmpty(str(user["user_id"]), str(user["userId"]), str(user["uid"]), str(user["id"]))
 	return name, uid, nil
 }
 
-func fetchPlan(ctx context.Context, client *http.Client, dt string) (map[string]string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", openapiBase+"/api/v2/user/plan", nil)
+// fetchPlan 套餐信息，取自 account-context 的 user / plan 段。
+func (p *plugin) fetchPlan(ctx context.Context, client *http.Client, dt string) (map[string]string, error) {
+	env, err := p.accountContext(ctx, client, dt)
 	if err != nil {
 		return nil, err
 	}
-	authedJSON(req, dt)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("plan HTTP %d", resp.StatusCode)
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
-	}
+	user, _ := env["user"].(map[string]interface{})
+	plan, _ := env["plan"].(map[string]interface{})
 	out := map[string]string{}
-	for _, k := range []string{"user_type", "plan_tier_name", "plan_name", "display_name", "expire_time", "expires_at"} {
-		if v := str(m[k]); v != "" {
-			out[k] = v
+	put := func(key string, vals ...interface{}) {
+		for _, v := range vals {
+			if sv := str(v); sv != "" {
+				out[key] = sv
+				return
+			}
 		}
+	}
+	if plan != nil {
+		put("plan_tier_name", plan["plan_name"], plan["display_name"], plan["tier_name"])
+		put("plan_name", plan["plan_name"], plan["name"])
+		put("expire_time", plan["expire_time"], plan["expires_at"], plan["next_due_date"])
+		put("user_type", plan["user_type"], plan["type"])
+	}
+	if user != nil {
+		put("plan_tier_name", user["plan_name"], user["plan_tier_name"])
+		put("user_type", user["user_type"], user["account_type"])
+		put("expire_time", user["expire_time"], user["plan_expire_time"])
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("账号上下文里没有套餐信息")
 	}
 	return out, nil
 }
@@ -400,8 +465,11 @@ type checkinStatus struct {
 	LastClaimedAt      int64  `json:"lastClaimedAt"`
 }
 
-func fetchCheckinStatus(ctx context.Context, client *http.Client, dt string) (*checkinStatus, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", openapiBase+"/sash/api/v1/me/daily-check-in/status", nil)
+// errNoCheckinAPI 千问办公没有 Qoder 的 /sash 签到接口（实测 404）。
+var errNoCheckinAPI = errors.New("该产品没有每日签到接口（/sash 仅 Qoder 账号体系提供）")
+
+func (p *plugin) fetchCheckinStatus(ctx context.Context, client *http.Client, dt string) (*checkinStatus, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", p.openapiBaseURL()+"/sash/api/v1/me/daily-check-in/status", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -412,6 +480,9 @@ func fetchCheckinStatus(ctx context.Context, client *http.Client, dt string) (*c
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == 404 {
+		return nil, errNoCheckinAPI
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("checkin status HTTP %d", resp.StatusCode)
 	}
@@ -423,8 +494,8 @@ func fetchCheckinStatus(ctx context.Context, client *http.Client, dt string) (*c
 }
 
 // claimCheckin 领取每日签到积分；已领取返回 claimed=true（幂等，不算失败）。
-func claimCheckin(ctx context.Context, client *http.Client, dt string) (ok bool, claimed bool, detail string, err error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", openapiBase+"/sash/api/v1/me/daily-check-in/claim", strings.NewReader("{}"))
+func (p *plugin) claimCheckin(ctx context.Context, client *http.Client, dt string) (ok bool, claimed bool, detail string, err error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", p.openapiBaseURL()+"/sash/api/v1/me/daily-check-in/claim", strings.NewReader("{}"))
 	if err != nil {
 		return false, false, "", err
 	}
@@ -436,6 +507,9 @@ func claimCheckin(ctx context.Context, client *http.Client, dt string) (ok bool,
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	body := string(raw)
+	if resp.StatusCode == 404 {
+		return false, false, "", errNoCheckinAPI
+	}
 	if resp.StatusCode >= 400 {
 		low := strings.ToLower(body)
 		if resp.StatusCode == 409 || strings.Contains(low, "not_eligible") || strings.Contains(low, "claimed") {
@@ -476,15 +550,20 @@ func needRefresh(c *accountCred) bool {
 }
 
 // refreshDeviceToken 用 drt- 换新 dt-（上游会轮换 refresh token）。
-func refreshDeviceToken(ctx context.Context, client *http.Client, c *accountCred) error {
-	body, _ := json.Marshal(map[string]string{"refresh_token": c.DRT})
-	req, err := http.NewRequestWithContext(ctx, "POST", openapiBase+"/api/v1/deviceToken/refresh", strings.NewReader(string(body)))
+//
+// 官方客户端 refreshDeviceToken() 的请求体是 {refresh_token, target:"c"}，打到
+// openApiBase 的 /api/v1/deviceToken/refresh（实测该路由存在，缺 refresh_token 时 400）。
+func (p *plugin) refreshDeviceToken(ctx context.Context, client *http.Client, c *accountCred) error {
+	body, _ := json.Marshal(map[string]string{"refresh_token": c.DRT, "target": "c"})
+	req, err := http.NewRequestWithContext(ctx, "POST", p.openapiBaseURL()+"/api/v1/deviceToken/refresh", strings.NewReader(string(body)))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Go-http-client/2.0")
+	for k, v := range p.qwenWorkClientHeaders() {
+		req.Header.Set(k, v)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -499,6 +578,7 @@ func refreshDeviceToken(ctx context.Context, client *http.Client, c *accountCred
 		Token        string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int64  `json:"expires_in"`
+		ExpiresAt    string `json:"expires_at"`
 	}
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return err
@@ -511,8 +591,14 @@ func refreshDeviceToken(ctx context.Context, client *http.Client, c *accountCred
 	if t.RefreshToken != "" {
 		c.DRT = t.RefreshToken
 	}
+	if t.ExpiresAt != "" {
+		if parsed, perr := time.Parse(time.RFC3339, strings.TrimSpace(t.ExpiresAt)); perr == nil {
+			c.ExpiresAt = parsed.Unix()
+			return nil
+		}
+	}
 	if t.ExpiresIn > 0 {
-		c.ExpiresAt = time.Now().Unix() + t.ExpiresIn/1000
+		c.ExpiresAt = expiryFromNow(t.ExpiresIn)
 	}
 	return nil
 }

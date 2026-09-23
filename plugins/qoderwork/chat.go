@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,7 +109,7 @@ func (p *plugin) fetchModels(ctx context.Context, cred *accountCred) ([]dynamicM
 	if err != nil {
 		return nil, err
 	}
-	rawURL := gatewayBase + modelsPath
+	rawURL := p.gatewayBaseURL() + modelsPath
 	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -200,7 +201,7 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		return stream.Send(failed(500, err.Error()))
 	}
 	if needRefresh(cred) {
-		if err := refreshDeviceToken(ctx, p.httpClient(cred), cred); err != nil {
+		if err := p.refreshDeviceToken(ctx, p.httpClient(cred), cred); err != nil {
 			return stream.Send(failed(401, "设备令牌刷新失败，需重新授权: "+err.Error()))
 		}
 	}
@@ -223,7 +224,7 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	if err != nil {
 		return stream.Send(failed(500, err.Error()))
 	}
-	rawURL := gatewayBase + chatPath
+	rawURL := p.gatewayBaseURL() + chatPath
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", rawURL, strings.NewReader(encoded))
 	if err != nil {
 		return stream.Send(failed(500, err.Error()))
@@ -495,12 +496,19 @@ func (p *plugin) RunTask(ctx context.Context, req *pb.RunTaskRequest) (*pb.RunTa
 	}
 	client := p.httpClient(cred)
 	if needRefresh(cred) {
-		if err := refreshDeviceToken(ctx, client, cred); err != nil {
+		if err := p.refreshDeviceToken(ctx, client, cred); err != nil {
 			return nil, status.Error(codes.Unauthenticated, "设备令牌刷新失败: "+err.Error())
 		}
 	}
-	ok, claimed, detail, err := claimCheckin(ctx, client, cred.DT)
+	ok, claimed, detail, err := p.claimCheckin(ctx, client, cred.DT)
 	res := &pb.RunTaskResponse{Blob: marshalCred(cred), Changed: true}
+	if errors.Is(err, errNoCheckinAPI) {
+		return &pb.RunTaskResponse{
+			Blob:    marshalCred(cred),
+			Changed: false,
+			Summary: "该账号没有每日签到：千问办公未提供 /sash 签到接口（这是 Qoder 账号体系的功能）",
+		}, nil
+	}
 	switch {
 	case err != nil:
 		return nil, status.Error(codes.Internal, err.Error())
@@ -511,7 +519,7 @@ func (p *plugin) RunTask(ctx context.Context, req *pb.RunTaskRequest) (*pb.RunTa
 	default:
 		res.Summary = "签到未生效"
 	}
-	if st, err := fetchCheckinStatus(ctx, client, cred.DT); err == nil {
+	if st, err := p.fetchCheckinStatus(ctx, client, cred.DT); err == nil {
 		res.DetailJson = checkinDetailJSON(st)
 	}
 	return res, nil

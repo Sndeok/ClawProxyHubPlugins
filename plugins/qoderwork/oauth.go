@@ -19,12 +19,23 @@ import (
 	pb "github.com/Sndeok/ClawProxyHub-Next/sdk/proto/cphv1"
 )
 
-// QoderWork（CN）设备授权（PKCE）常量——与官方桌面端一致。
+// 千问办公（QwenWork CN）设备授权（PKCE）常量——全部取自官方桌面端 1.2.1 的
+// app.asar（AuthManager.startDeviceFlow）：
+//
+//	authBase     = https://{resolveWebsiteDomain()}  -> gateway.qwenwork.cn
+//	openApiBase  = https://{resolveOpenApiDomain()}  -> gateway.qwenwork.cn
+//	client_id    = QWENWORK_CN_CLIENT_ID             -> e883ade2-...
+//	redirect_uri = getRedirectUri()                  -> "qwenwork-cn://"
+//
+// 注意：这里登的是「千问办公」账号体系（产品码 qwenworkcn），不是 Qoder（qoder.com.cn）。
+//
+// 服务端对 /device/selectAccounts 的 query 有强校验（实测）：nonce / machine_id 必须是
+// 标准 UUID（带横线），challenge 必须是 S256 的 43 字符 base64url，任一不满足都会 400
+// INVALID_DEVICE_FLOW（details.field=query, reason=not_allowed）。
 const (
-	oauthWebsiteCN = "https://qoder.com.cn"
-	oauthOpenapiCN = "https://openapi.qoder.com.cn"
-	oauthClientID  = "1c5e33e1-364d-4ce6-b02c-acaa81274a5c"
-	oauthRedirect  = "qoder-work-cn://"
+	oauthBaseCN   = "https://gateway.qwenwork.cn"
+	oauthClientID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
+	oauthRedirect = "qwenwork-cn://"
 )
 
 // loginSession 一次进行中的设备授权。
@@ -51,7 +62,7 @@ func (p *plugin) loginOAuth(ctx context.Context, req *pb.LoginRequest) (*pb.Logi
 		sess := newLoginSession()
 		loginID = randomID(16)
 		p.putLogin(loginID, sess)
-		return &pb.LoginResult{Next: p.waitStep(loginID, authURL(sess))}, nil
+		return &pb.LoginResult{Next: p.waitStep(loginID, p.authURL(sess))}, nil
 	}
 
 	sess := p.getLogin(loginID)
@@ -60,24 +71,28 @@ func (p *plugin) loginOAuth(ctx context.Context, req *pb.LoginRequest) (*pb.Logi
 		fresh := newLoginSession()
 		loginID = randomID(16)
 		p.putLogin(loginID, fresh)
-		return &pb.LoginResult{Next: p.waitStep(loginID, authURL(fresh))}, nil
+		return &pb.LoginResult{Next: p.waitStep(loginID, p.authURL(fresh))}, nil
 	}
 
-	token, pending, err := pollDeviceToken(ctx, p.httpClient(nil), sess)
+	token, pending, err := p.pollDeviceToken(ctx, p.httpClient(nil), sess)
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, "轮询授权结果失败: "+err.Error())
 	}
 	if pending {
 		// 用户还没在浏览器里完成授权：保持轮询
-		return &pb.LoginResult{Next: p.waitStep(loginID, authURL(sess))}, nil
+		return &pb.LoginResult{Next: p.waitStep(loginID, p.authURL(sess))}, nil
 	}
 
+	expiresAt := token.ExpiresAt
+	if expiresAt == 0 {
+		expiresAt = expiryFromNow(token.ExpiresIn)
+	}
 	cred := &accountCred{
 		DT:        token.DeviceToken,
 		DRT:       token.RefreshToken,
 		UID:       token.UserID,
 		Region:    regionCN,
-		ExpiresAt: expiryFromNow(token.ExpiresIn),
+		ExpiresAt: expiresAt,
 	}
 	if cred.DT == "" {
 		return nil, status.Error(codes.Internal, "上游授权成功但没有返回设备令牌")
@@ -86,7 +101,7 @@ func (p *plugin) loginOAuth(ctx context.Context, req *pb.LoginRequest) (*pb.Logi
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	// 昵称：userinfo 顺带校验令牌
-	if name, uid, err := fetchUserInfo(ctx, p.httpClient(cred), cred.DT); err == nil {
+	if name, uid, err := p.fetchUserInfo(ctx, p.httpClient(cred), cred.DT); err == nil {
 		if name != "" {
 			cred.Nickname = name
 		}
@@ -103,8 +118,8 @@ func (p *plugin) waitStep(loginID, url string) *pb.LoginNextStep {
 	return &pb.LoginNextStep{
 		Action: "open_url", Url: url,
 		Prompt: map[string]string{
-			"zh": "已在浏览器打开 QoderWork 授权页：登录并确认授权后，本页会自动完成（无需粘贴任何回调）",
-			"en": "QoderWork auth page opened in your browser. After you approve, this step completes automatically.",
+			"zh": "已在浏览器打开「千问办公」授权页：登录并确认授权后，本页会自动完成（无需粘贴任何回调）",
+			"en": "QwenWork auth page opened in your browser. After you approve, this step completes automatically.",
 		},
 		State: st,
 		Wait:  true,
@@ -143,14 +158,25 @@ func newLoginSession() *loginSession {
 	verifier, _ := makePKCE()
 	return &loginSession{
 		Verifier:  verifier,
-		Nonce:     randomID(32),
+		Nonce:     randomUUID(),
 		MachineID: randomUUID(),
 		CreatedAt: time.Now(),
 	}
 }
 
+// oauthBase 授权页 / OpenAPI 基址（千问办公的授权与 OpenAPI 同在一台网关）；设置 auth_base 可覆盖。
+func (p *plugin) oauthBase() string {
+	return strings.TrimRight(p.settingStr("auth_base", oauthBaseCN), "/")
+}
+
 // authURL 授权页（challenge=S256(verifier)，redirect_uri 与官方客户端一致）。
-func authURL(s *loginSession) string {
+//
+// 真实行为（实测）：网关校验通过后 302 到千问办公 IAM
+//
+//	https://qwenwork.cn/oauth2/auth?client_id=qwenwork-desktop-app&code_challenge=...&scope=openid profile email offline_access qwen_work
+//
+// 用户在浏览器完成登录授权后，网关侧记录该 nonce 的 device flow，插件再轮询取令牌。
+func (p *plugin) authURL(s *loginSession) string {
 	sum := sha256.Sum256([]byte(s.Verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 	q := url.Values{}
@@ -160,28 +186,33 @@ func authURL(s *loginSession) string {
 	q.Set("machine_id", s.MachineID)
 	q.Set("client_id", oauthClientID)
 	q.Set("redirect_uri", oauthRedirect)
-	return oauthWebsiteCN + "/device/selectAccounts?" + q.Encode()
+	return p.oauthBase() + "/device/selectAccounts?" + q.Encode()
 }
 
 type deviceToken struct {
 	DeviceToken  string
 	RefreshToken string
 	UserID       string
-	ExpiresIn    int64 // 毫秒
+	ExpiresIn    int64 // 上游原样返回，秒/毫秒都可能
+	ExpiresAt    int64 // 绝对过期时间（响应带 expires_at 时优先）
 }
 
-// pollDeviceToken 轮询一次；pending=true 表示用户尚未完成授权（上游 404）。
-func pollDeviceToken(ctx context.Context, client *http.Client, s *loginSession) (deviceToken, bool, error) {
+// pollDeviceToken 轮询一次；pending=true 表示用户尚未完成授权（上游 404，与官方客户端一致）。
+func (p *plugin) pollDeviceToken(ctx context.Context, client *http.Client, s *loginSession) (deviceToken, bool, error) {
 	q := url.Values{}
 	q.Set("nonce", s.Nonce)
 	q.Set("verifier", s.Verifier)
 	q.Set("challenge_method", "S256")
-	req, err := http.NewRequestWithContext(ctx, "GET", oauthOpenapiCN+"/api/v1/deviceToken/poll?"+q.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", p.oauthBase()+"/api/v1/deviceToken/poll?"+q.Encode(), nil)
 	if err != nil {
 		return deviceToken{}, false, err
 	}
+	// 与官方客户端 pollDeviceToken 同一组请求头：Accept + X-Request-Id + X-QwenWork-*
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Go-http-client/2.0")
+	req.Header.Set("X-Request-Id", randomUUID())
+	for k, v := range p.qwenWorkClientHeaders() {
+		req.Header.Set(k, v)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return deviceToken{}, false, err
@@ -198,10 +229,15 @@ func pollDeviceToken(ctx context.Context, client *http.Client, s *loginSession) 
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return deviceToken{}, false, err
 	}
+	// 官方客户端会校验服务端回传的 nonce / code_challenge 绑定，这里做 nonce 一致性检查。
+	if v := str(m["nonce"]); v != "" && v != s.Nonce {
+		return deviceToken{}, false, fmt.Errorf("上游返回的 nonce 与会话不匹配")
+	}
 	tok := deviceToken{
 		DeviceToken:  firstNonEmpty(str(m["token"]), str(m["device_token"])),
 		RefreshToken: str(m["refresh_token"]),
 		UserID:       firstNonEmpty(str(m["user_id"]), str(m["userId"])),
+		ExpiresAt:    expiryFromResponse(m),
 	}
 	if f, ok := m["expires_in"].(float64); ok {
 		tok.ExpiresIn = int64(f)
@@ -212,12 +248,33 @@ func pollDeviceToken(ctx context.Context, client *http.Client, s *loginSession) 
 	return tok, false, nil
 }
 
-// expiryFromNow 把 expires_in（毫秒）换算成绝对过期时间；0 表示未知。
-func expiryFromNow(ms int64) int64 {
-	if ms <= 0 {
+// expiryFromNow 把 expires_in 换算成绝对过期时间；秒与毫秒都兼容，0 表示未知。
+func expiryFromNow(v int64) int64 {
+	if v <= 0 {
 		return 0
 	}
-	return time.Now().Unix() + ms/1000
+	if v > 1_000_000 { // 明显是毫秒
+		return time.Now().Unix() + v/1000
+	}
+	return time.Now().Unix() + v
+}
+
+// expiryFromResponse 优先用响应里的 expires_at（ISO8601 字符串或秒/毫秒时间戳）。
+func expiryFromResponse(m map[string]interface{}) int64 {
+	switch v := m["expires_at"].(type) {
+	case string:
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(v)); err == nil {
+			return t.Unix()
+		}
+	case float64:
+		if v > 1e12 {
+			return int64(v / 1000)
+		}
+		if v > 0 {
+			return int64(v)
+		}
+	}
+	return 0
 }
 
 // makePKCE 生成 64 字符 verifier（与官方客户端同一取模采样，勿"优化"）。

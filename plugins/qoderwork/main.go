@@ -132,7 +132,7 @@ func (p *plugin) loginToken(ctx context.Context, req *pb.LoginRequest) (*pb.Logi
 		return nil, err
 	}
 	// 用 userinfo 校正 uid/昵称（也顺带校验令牌是否可用）
-	name, realUID, err := fetchUserInfo(ctx, p.httpClient(cred), cred.DT)
+	name, realUID, err := p.fetchUserInfo(ctx, p.httpClient(cred), cred.DT)
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "令牌校验失败: "+err.Error())
 	}
@@ -197,14 +197,14 @@ func (p *plugin) Refresh(ctx context.Context, blob *pb.CredentialBlob) (*pb.Refr
 	client := p.httpClient(cred)
 	changed := false
 	if needRefresh(cred) {
-		if err := refreshDeviceToken(ctx, client, cred); err != nil {
+		if err := p.refreshDeviceToken(ctx, client, cred); err != nil {
 			return nil, status.Error(codes.Unauthenticated, "设备令牌刷新失败（需重新授权）: "+err.Error())
 		}
 		changed = true
 	}
 	// 昵称/uid 缺失时补齐（粘贴令牌的场景）
 	if cred.UID == "" || cred.Nickname == "" {
-		if name, uid, err := fetchUserInfo(ctx, client, cred.DT); err == nil {
+		if name, uid, err := p.fetchUserInfo(ctx, client, cred.DT); err == nil {
 			if cred.UID == "" && uid != "" {
 				cred.UID = uid
 				changed = true
@@ -234,12 +234,12 @@ func (p *plugin) GetProfile(ctx context.Context, blob *pb.CredentialBlob) (*pb.A
 // 任何一项失败都不影响返回（额度缺失只影响展示）。
 func (p *plugin) profileFor(ctx context.Context, cred *accountCred) *pb.AccountProfile {
 	prof := &pb.AccountProfile{
-		DisplayName: orDefault(cred.Nickname, orDefault(cred.UID, "QoderWork")),
+		DisplayName: orDefault(cred.Nickname, orDefault(cred.UID, "千问办公")),
 		Healthy:     true,
 		Quota:       map[string]string{},
 	}
 	client := p.httpClient(cred)
-	q, err := fetchQuota(ctx, client, cred.DT)
+	q, err := p.fetchQuota(ctx, client, cred.DT)
 	if err != nil {
 		prof.Healthy = false
 		prof.Sections = append(prof.Sections, sectionNote("quota_error", "额度查询失败", err.Error()))
@@ -263,10 +263,10 @@ func (p *plugin) profileFor(ctx context.Context, cred *accountCred) *pb.AccountP
 		prof.Healthy = false
 	}
 	prof.CreditsJson = q.CreditsJSON()
-	if st, err := fetchCheckinStatus(ctx, client, cred.DT); err == nil {
+	if st, err := p.fetchCheckinStatus(ctx, client, cred.DT); err == nil {
 		prof.Sections = append(prof.Sections, checkinSection(st, q))
 	}
-	if plan, err := fetchPlan(ctx, client, cred.DT); err == nil {
+	if plan, err := p.fetchPlan(ctx, client, cred.DT); err == nil {
 		prof.Sections = append(prof.Sections, planSection(plan))
 	}
 	return prof
