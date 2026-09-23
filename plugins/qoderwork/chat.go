@@ -354,9 +354,8 @@ func (p *plugin) buildAgentBody(chatBody map[string]interface{}, modelKey string
 		"request_set_id": randomUUID(),
 		"session_id":     randomUUID(),
 		"stream":         true,
-		// 客户端（千问办公）实测字段：session_type=qoder_work、aliyun_user_type 空串、
-		// source=1、version=3、task_id=common；此前用 qodercli + personal_professional_trial，
-		// 上游会忽略 model_config 直接回默认模型。
+		// 对齐千问办公客户端：session_type=qoder_work、aliyun_user_type 留空、
+		// source=1、version=3、task_id=common（这几项 + model_config 不全时，上游会忽略所选模型）。
 		"aliyun_user_type": p.settingStr("aliyun_user_type", defaultAliyunUserType),
 		"agent_id":         "agent_common",
 		"session_type":     p.settingStr("session_type", defaultSessionType),
@@ -367,7 +366,8 @@ func (p *plugin) buildAgentBody(chatBody map[string]interface{}, modelKey string
 		"is_reply":         true,
 		"is_retry":         false,
 		"image_urls":       nil,
-		// model_config 按客户端 SDK 的完整形状下发（只给 key 时上游会忽略模型、回落默认模型）
+		// model_config 必须是客户端 SDK 那种完整形状：实测只给 {key,is_reasoning} 时上游静默回落
+		// 默认模型（所有模型都回同一个），补齐 source/format/is_vl/display_name 等后才真正按所选路由。
 		"model_config": map[string]interface{}{
 			"key":              modelKey,
 			"display_name":     modelKey,
