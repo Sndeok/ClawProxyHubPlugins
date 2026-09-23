@@ -246,10 +246,14 @@ func (p *plugin) profileFor(ctx context.Context, cred *accountCred) *pb.AccountP
 		return prof
 	}
 	// 客户端同源的「积分余额」（日/月/长期钱包）优先；失败不影响主流程
-	if w, werr := fetchWallets(ctx, client, cred.DT); werr == nil {
+	if w, werr := p.fetchWallets(ctx, client, cred.DT); werr == nil {
 		q.Wallets = w
-	} else if p.host != nil {
-		p.host.Log("warn", "qoderwork wallets 拉取失败，退回 quota/usage: "+werr.Error())
+	} else {
+		// 退回 quota/usage，并把失败原因挂到资料块（/admin/accounts/{id}/detail 可见）
+		if p.host != nil {
+			p.host.Log("warn", "qoderwork wallets 拉取失败，退回 quota/usage: "+werr.Error())
+		}
+		prof.Sections = append(prof.Sections, sectionNote("wallets_error", "积分余额（钱包）拉取失败", werr.Error()))
 	}
 	prof.Quota["credits"] = fmt.Sprintf("%d", q.Remaining())
 	prof.Quota["total_credits"] = fmt.Sprintf("%d", q.Total())

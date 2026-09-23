@@ -207,7 +207,7 @@ func TestFetchWalletsUsesClientEndpoint(t *testing.T) {
 	openapiBase = srv.URL
 	defer func() { openapiBase = old }()
 
-	w, err := fetchWallets(context.Background(), srv.Client(), "dt-test")
+	w, err := (&plugin{}).fetchWallets(context.Background(), srv.Client(), "dt-test")
 	if err != nil {
 		t.Fatalf("fetchWallets: %v", err)
 	}

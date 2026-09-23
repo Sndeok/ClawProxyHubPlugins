@@ -34,6 +34,15 @@ const (
 	defaultBusinessType = "agent"      // b1t
 	defaultScene        = "assistant"  // P1t
 
+	// 客户端（千问办公）请求头默认值：适配器 API 需要这组 X-QwenWork-* 头，
+	// 值取自客户端 getQwenWorkClientHeaders()；可用插件设置覆盖。
+	defaultQwenWorkVersion  = "1.2.1"
+	defaultQwenWorkRelease  = "1.2.1-26092107"
+	defaultQwenWorkBuild    = "26092107"
+	defaultQwenWorkPlatform = "win32"
+	defaultQwenWorkArch     = "x64"
+	defaultQwenWorkChannel  = "stable"
+
 	// 请求体默认值（对齐客户端 QwenWork 构建的 body）
 	defaultSessionType    = "qoder_work" // session_type
 	defaultAliyunUserType = ""           // 客户端发空串
@@ -231,12 +240,32 @@ func fetchQuota(ctx context.Context, client *http.Client, dt string) (*quotaInfo
 
 // fetchWallets 拉客户端同源的钱包余额（GET /api/v1/adapter/user/wallets）。
 // 响应等价于客户端 unwrapAdapterResponse：有 data 对象就取 data；三个钱包各取 total_balance。
-func fetchWallets(ctx context.Context, client *http.Client, dt string) (*walletBalances, error) {
+// qwenWorkClientHeaders 客户端（千问办公）请求头。
+// 适配器 API（/api/v1/adapter/**）要求这组 X-QwenWork-* 头，缺了会被拒；
+// 取值对应客户端 getQwenWorkClientHeaders()，都可用插件设置覆盖。
+func (p *plugin) qwenWorkClientHeaders() map[string]string {
+	return map[string]string{
+		"Accept":                     "application/json",
+		"User-Agent":                 "qoderwork/" + p.settingStr("qwenwork_version", defaultQwenWorkVersion),
+		"X-Request-Id":               randomUUID(),
+		"X-QwenWork-Version":         p.settingStr("qwenwork_version", defaultQwenWorkVersion),
+		"X-QwenWork-Release-Version": p.settingStr("qwenwork_release_version", defaultQwenWorkRelease),
+		"X-QwenWork-Build":           p.settingStr("qwenwork_build", defaultQwenWorkBuild),
+		"X-QwenWork-Platform":        p.settingStr("qwenwork_platform", defaultQwenWorkPlatform),
+		"X-QwenWork-Arch":            p.settingStr("qwenwork_arch", defaultQwenWorkArch),
+		"X-QwenWork-Channel":         p.settingStr("qwenwork_channel", defaultQwenWorkChannel),
+	}
+}
+
+func (p *plugin) fetchWallets(ctx context.Context, client *http.Client, dt string) (*walletBalances, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", openapiBase+"/api/v1/adapter/user/wallets", nil)
 	if err != nil {
 		return nil, err
 	}
 	authedJSON(req, dt)
+	for k, v := range p.qwenWorkClientHeaders() {
+		req.Header.Set(k, v)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
