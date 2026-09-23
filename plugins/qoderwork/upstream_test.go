@@ -16,7 +16,7 @@ func TestBuildAgentBody(t *testing.T) {
 		},
 		"tools": []interface{}{map[string]interface{}{"type": "function"}},
 	}
-	raw := buildAgentBody(chatBody, "qmodel_preview", &accountCred{UID: "u1"})
+	raw := (&plugin{}).buildAgentBody(chatBody, "qmodel_preview", &accountCred{UID: "u1"})
 	var body map[string]interface{}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("请求体不是合法 JSON: %v", err)
@@ -30,8 +30,9 @@ func TestBuildAgentBody(t *testing.T) {
 	if body["stream"] != true {
 		t.Errorf("stream 必须为 true（上游只支持流式）")
 	}
-	if body["session_type"] != "qodercli" {
-		t.Errorf("session_type = %v", body["session_type"])
+	// 对齐客户端：千问办公用 qoder_work，空值回落默认（插件设置可覆盖）
+	if body["session_type"] != defaultSessionType {
+		t.Errorf("session_type = %v, want %v", body["session_type"], defaultSessionType)
 	}
 	if mc, ok := body["model_config"].(map[string]interface{}); !ok || mc["key"] != "qmodel_preview" {
 		t.Errorf("model_config.key 未按模型写入: %v", body["model_config"])
@@ -57,7 +58,7 @@ func TestBuildAgentBody(t *testing.T) {
 
 // TestBuildAgentBodyNoTools 客户端没给 tools 时不应注入（否则会带上模板的 74 个工具定义）。
 func TestBuildAgentBodyNoTools(t *testing.T) {
-	raw := buildAgentBody(map[string]interface{}{
+	raw := (&plugin{}).buildAgentBody(map[string]interface{}{
 		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
 	}, "m1", &accountCred{UID: "u1"})
 	var body map[string]interface{}

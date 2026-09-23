@@ -210,7 +210,7 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	if modelKey == "" {
 		return stream.Send(failed(400, "缺少模型名"))
 	}
-	envelope := buildAgentBody(body, modelKey, cred)
+	envelope := p.buildAgentBody(body, modelKey, cred)
 	encoded, err := qodersign.Encode(envelope)
 	if err != nil {
 		return stream.Send(failed(500, "请求编码失败: "+err.Error()))
@@ -344,22 +344,29 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 // buildAgentBody 构造 QoderWork agent_chat_generation 请求体（最小可用骨架，
 // 只带客户端自己的 messages/tools —— 参考实现实测模板 system/tools 非必需，
 // 不注入可让 baseline prompt 从 ~10K token 降到 ~60）。
-func buildAgentBody(chatBody map[string]interface{}, modelKey string, cred *accountCred) []byte {
+func (p *plugin) buildAgentBody(chatBody map[string]interface{}, modelKey string, cred *accountCred) []byte {
 	prompt := lastUserPrompt(chatBody)
 	now := time.Now()
 	uuid := randomUUID()
 	body := map[string]interface{}{
-		"request_id":       uuid,
-		"chat_record_id":   uuid,
-		"request_set_id":   randomUUID(),
-		"session_id":       randomUUID(),
-		"stream":           true,
-		"aliyun_user_type": defaultUserType,
+		"request_id":     uuid,
+		"chat_record_id": uuid,
+		"request_set_id": randomUUID(),
+		"session_id":     randomUUID(),
+		"stream":         true,
+		// 客户端（千问办公）实测字段：session_type=qoder_work、aliyun_user_type 空串、
+		// source=1、version=3、task_id=common；此前用 qodercli + personal_professional_trial，
+		// 上游会忽略 model_config 直接回默认模型。
+		"aliyun_user_type": p.settingStr("aliyun_user_type", defaultAliyunUserType),
 		"agent_id":         "agent_common",
+		"session_type":     p.settingStr("session_type", defaultSessionType),
+		"task_id":          p.settingStr("task_id", defaultTaskID),
+		"source":           1,
+		"version":          "3",
 		"chat_task":        "FREE_INPUT",
 		"is_reply":         true,
+		"is_retry":         false,
 		"image_urls":       nil,
-		"session_type":     "qodercli",
 		"model_config":     map[string]interface{}{"key": modelKey, "is_reasoning": false},
 		"chat_context": map[string]interface{}{
 			"chatPrompt": "",

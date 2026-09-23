@@ -33,6 +33,11 @@ const (
 	defaultProduct      = "qoder_work" // Yqe
 	defaultBusinessType = "agent"      // b1t
 	defaultScene        = "assistant"  // P1t
+
+	// 请求体默认值（对齐客户端 QwenWork 构建的 body）
+	defaultSessionType    = "qoder_work" // session_type
+	defaultAliyunUserType = ""           // 客户端发空串
+	defaultTaskID         = "common"     // task_id
 )
 
 // headerCfg QoderWork（千问办公）的 COSY 头配置。
