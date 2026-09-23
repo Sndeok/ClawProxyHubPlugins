@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -178,5 +182,58 @@ func TestStripCacheControl(t *testing.T) {
 	}
 	if img["url"] != "data:image/png;base64,AA==" {
 		t.Errorf("图片地址被改动: %v", img)
+	}
+}
+
+// TestFetchWalletsUsesClientEndpoint 钱包余额：客户端同源接口 /api/v1/adapter/user/wallets，
+// 三个钱包取 total_balance 求和（与客户端「积分余额」一致），并覆盖 {data:{...}} 包装形态。
+func TestFetchWalletsUsesClientEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/adapter/user/wallets" {
+			t.Errorf("请求路径 = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer dt-test" {
+			t.Errorf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{
+		  "daily_credits":{"total_balance":100.5},
+		  "monthly_credits":{"totalBalance":1000},
+		  "longterm_credits":{"total_balance":"999.5"}
+		}}`)
+	}))
+	defer srv.Close()
+	old := openapiBase
+	openapiBase = srv.URL
+	defer func() { openapiBase = old }()
+
+	w, err := fetchWallets(context.Background(), srv.Client(), "dt-test")
+	if err != nil {
+		t.Fatalf("fetchWallets: %v", err)
+	}
+	if got := w.Total(); got != 2100 {
+		t.Errorf("钱包合计 = %v，期望 2100", got)
+	}
+	if !w.HasDaily || !w.HasMonthly || !w.HasLongterm {
+		t.Errorf("三个钱包都应解析成功：%+v", w)
+	}
+
+	// 快照：有钱包时按钱包出包，remaining/total 都用钱包合计
+	q := &quotaInfo{Wallets: w, UserTotal: 300, UserUsed: 1, UserRemaining: 299}
+	if q.Remaining() != 2100 || q.Total() != 2100 {
+		t.Errorf("quota 聚合未优先用钱包：remaining=%d total=%d", q.Remaining(), q.Total())
+	}
+	var snap struct {
+		Remaining string              `json:"remaining"`
+		Packages  []map[string]string `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(q.CreditsJSON()), &snap); err != nil {
+		t.Fatalf("快照不是合法 JSON: %v", err)
+	}
+	if snap.Remaining != "2100" {
+		t.Errorf("快照 remaining = %s，期望 2100", snap.Remaining)
+	}
+	if len(snap.Packages) != 3 {
+		t.Errorf("应输出 日/月度/长期 三个额度包，实际 %v", snap.Packages)
 	}
 }

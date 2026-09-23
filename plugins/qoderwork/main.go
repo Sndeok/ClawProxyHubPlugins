@@ -245,6 +245,12 @@ func (p *plugin) profileFor(ctx context.Context, cred *accountCred) *pb.AccountP
 		prof.Sections = append(prof.Sections, sectionNote("quota_error", "额度查询失败", err.Error()))
 		return prof
 	}
+	// 客户端同源的「积分余额」（日/月/长期钱包）优先；失败不影响主流程
+	if w, werr := fetchWallets(ctx, client, cred.DT); werr == nil {
+		q.Wallets = w
+	} else if p.host != nil {
+		p.host.Log("warn", "qoderwork wallets 拉取失败，退回 quota/usage: "+werr.Error())
+	}
 	prof.Quota["credits"] = fmt.Sprintf("%d", q.Remaining())
 	prof.Quota["total_credits"] = fmt.Sprintf("%d", q.Total())
 	prof.Quota["used_credits"] = fmt.Sprintf("%d", q.Used())

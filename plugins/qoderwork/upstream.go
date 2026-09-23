@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +21,6 @@ import (
 // QoderWork（CN）上游端点（逐步与参考实现核对）。
 const (
 	regionCN       = "cn"
-	openapiBase    = "https://openapi.qoder.com.cn"
 	gatewayBase    = "https://gateway.qoder.com.cn"
 	modelsPath     = "/algo/api/v2/model/list?Encode=1"
 	chatPath       = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
@@ -39,6 +39,9 @@ const (
 	defaultAliyunUserType = ""           // 客户端发空串
 	defaultTaskID         = "common"     // task_id
 )
+
+// openapiBase 业务 OpenAPI 基址（测试里可替换为 httptest 地址）。
+var openapiBase = "https://openapi.qoder.com.cn"
 
 // headerCfg QoderWork（千问办公）的 COSY 头配置。
 //
@@ -109,7 +112,26 @@ func (p *plugin) httpClient(cred *accountCred) *http.Client {
 
 // ---------- 业务接口（Bearer dt-） ----------
 
+// walletBalances 客户端（千问办公）「积分余额」的三个钱包：日 / 月 / 长期。
+// 客户端走 GET /api/v1/adapter/user/wallets 取每个钱包的 total_balance——
+// 只读 /api/v2/quota/usage 的 userQuota/addOnQuota 会少算（实测 399 vs 客户端 2100）。
+type walletBalances struct {
+	Daily       float64
+	Monthly     float64
+	Longterm    float64
+	HasDaily    bool
+	HasMonthly  bool
+	HasLongterm bool
+}
+
+// Total 三个钱包余额之和 = 客户端侧「积分余额」。
+func (w *walletBalances) Total() float64 { return w.Daily + w.Monthly + w.Longterm }
+
+// Any 至少解析出一个钱包。
+func (w *walletBalances) Any() bool { return w.HasDaily || w.HasMonthly || w.HasLongterm }
+
 type quotaInfo struct {
+	Wallets        *walletBalances
 	UserTotal      float64
 	UserUsed       float64
 	UserRemaining  float64
@@ -119,17 +141,40 @@ type quotaInfo struct {
 	Exceeded       bool
 }
 
-func (q *quotaInfo) Total() int64     { return int64(q.UserTotal + q.AddonTotal) }
-func (q *quotaInfo) Used() int64      { return int64(q.UserUsed + q.AddonUsed) }
-func (q *quotaInfo) Remaining() int64 { return int64(q.UserRemaining + q.AddonRemaining) }
+// Total / Remaining 优先用客户端同源钱包余额；拿不到才退回 quota/usage。
+func (q *quotaInfo) Total() int64 {
+	if q.Wallets != nil && q.Wallets.Any() {
+		return int64(q.Wallets.Total())
+	}
+	return int64(q.UserTotal + q.AddonTotal)
+}
+func (q *quotaInfo) Used() int64 { return int64(q.UserUsed + q.AddonUsed) }
+func (q *quotaInfo) Remaining() int64 {
+	if q.Wallets != nil && q.Wallets.Any() {
+		return int64(q.Wallets.Total())
+	}
+	return int64(q.UserRemaining + q.AddonRemaining)
+}
 
 // CreditsJSON 核心侧积分快照（十进制字符串，避免精度丢失）。
 func (q *quotaInfo) CreditsJSON() string {
-	pkgs := []map[string]string{
-		{"name": "订阅额度", "total": ftoa(q.UserTotal), "used": ftoa(q.UserUsed), "remaining": ftoa(q.UserRemaining)},
-	}
-	if q.AddonTotal > 0 {
-		pkgs = append(pkgs, map[string]string{"name": "赠送额度", "total": ftoa(q.AddonTotal), "used": ftoa(q.AddonUsed), "remaining": ftoa(q.AddonRemaining)})
+	// 有客户端同源钱包就用它（余额口径），否则退回 quota/usage 的订阅 + 赠送额度
+	var pkgs []map[string]string
+	if q.Wallets != nil && q.Wallets.Any() {
+		if q.Wallets.HasDaily {
+			pkgs = append(pkgs, map[string]string{"name": "日额度", "total": ftoa(q.Wallets.Daily), "remaining": ftoa(q.Wallets.Daily)})
+		}
+		if q.Wallets.HasMonthly {
+			pkgs = append(pkgs, map[string]string{"name": "月度额度", "total": ftoa(q.Wallets.Monthly), "used": ftoa(q.UserUsed), "remaining": ftoa(q.Wallets.Monthly)})
+		}
+		if q.Wallets.HasLongterm {
+			pkgs = append(pkgs, map[string]string{"name": "长期额度", "total": ftoa(q.Wallets.Longterm), "remaining": ftoa(q.Wallets.Longterm)})
+		}
+	} else {
+		pkgs = append(pkgs, map[string]string{"name": "订阅额度", "total": ftoa(q.UserTotal), "used": ftoa(q.UserUsed), "remaining": ftoa(q.UserRemaining)})
+		if q.AddonTotal > 0 {
+			pkgs = append(pkgs, map[string]string{"name": "赠送额度", "total": ftoa(q.AddonTotal), "used": ftoa(q.AddonUsed), "remaining": ftoa(q.AddonRemaining)})
+		}
 	}
 	b, _ := json.Marshal(map[string]interface{}{
 		"total":     ftoa(float64(q.Total())),
@@ -182,6 +227,79 @@ func fetchQuota(ctx context.Context, client *http.Client, dt string) (*quotaInfo
 		AddonTotal: q.AddOnQuota.Total, AddonUsed: q.AddOnQuota.Used, AddonRemaining: q.AddOnQuota.Remaining,
 		Exceeded: q.IsQuotaExceeded,
 	}, nil
+}
+
+// fetchWallets 拉客户端同源的钱包余额（GET /api/v1/adapter/user/wallets）。
+// 响应等价于客户端 unwrapAdapterResponse：有 data 对象就取 data；三个钱包各取 total_balance。
+func fetchWallets(ctx context.Context, client *http.Client, dt string) (*walletBalances, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", openapiBase+"/api/v1/adapter/user/wallets", nil)
+	if err != nil {
+		return nil, err
+	}
+	authedJSON(req, dt)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("wallets HTTP %d: %s", resp.StatusCode, clip(string(raw), 200))
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return nil, fmt.Errorf("wallets 解析失败: %w", err)
+	}
+	body := raw
+	if d, ok := top["data"]; ok && len(d) > 0 && d[0] == '{' {
+		body = d
+	}
+	var wallets map[string]json.RawMessage
+	if err := json.Unmarshal(body, &wallets); err != nil {
+		return nil, fmt.Errorf("wallets 结构解析失败: %w", err)
+	}
+	out := &walletBalances{}
+	for _, spec := range []struct {
+		key   string
+		field *float64
+		seen  *bool
+	}{
+		{"daily_credits", &out.Daily, &out.HasDaily},
+		{"monthly_credits", &out.Monthly, &out.HasMonthly},
+		{"longterm_credits", &out.Longterm, &out.HasLongterm},
+	} {
+		rawWallet, ok := wallets[spec.key]
+		if !ok {
+			continue
+		}
+		var m map[string]interface{}
+		if json.Unmarshal(rawWallet, &m) != nil {
+			continue
+		}
+		if v, ok := numField(m, "total_balance", "totalBalance"); ok {
+			*spec.field = v
+			*spec.seen = true
+		}
+	}
+	if !out.Any() {
+		return nil, fmt.Errorf("wallets 未返回余额字段: %s", clip(string(body), 200))
+	}
+	return out, nil
+}
+
+// numField 从 map 里按候选键取数字（兼容 snake_case / camelCase 与字符串数字）。
+func numField(m map[string]interface{}, keys ...string) (float64, bool) {
+	for _, k := range keys {
+		switch v := m[k].(type) {
+		case float64:
+			return v, true
+		case string:
+			if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+				return f, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // fetchUserInfo 取昵称与 uid（兼作令牌校验）。
