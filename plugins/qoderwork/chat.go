@@ -367,7 +367,19 @@ func (p *plugin) buildAgentBody(chatBody map[string]interface{}, modelKey string
 		"is_reply":         true,
 		"is_retry":         false,
 		"image_urls":       nil,
-		"model_config":     map[string]interface{}{"key": modelKey, "is_reasoning": false},
+		// model_config 按客户端 SDK 的完整形状下发（只给 key 时上游会忽略模型、回落默认模型）
+		"model_config": map[string]interface{}{
+			"key":              modelKey,
+			"display_name":     modelKey,
+			"model":            "",
+			"format":           p.settingStr("model_format", "openai"),
+			"is_vl":            true,
+			"is_reasoning":     true,
+			"api_key":          "",
+			"url":              "",
+			"source":           p.settingStr("model_source", "system"),
+			"max_input_tokens": 1000000,
+		},
 		"chat_context": map[string]interface{}{
 			"chatPrompt": "",
 			"text":       map[string]interface{}{"type": "text", "text": prompt},
