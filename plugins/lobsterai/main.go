@@ -1176,11 +1176,10 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		}})
 	}
 	parser := openaiup.NewParser(func(ev *pb.StreamEvent) {
-		switch e := ev.Event.(type) {
+		switch ev.Event.(type) {
 		case *pb.StreamEvent_ContentDelta:
-			if e.ContentDelta.GetReasoning() {
-				break // 思考增量：照常下发，但不计入正文（空响应判定只看正文 / 工具调用）
-			}
+			// 思考增量同样算「上游有响应」：只有思考没有正文（例如 max_tokens 太小、预算被思考吃光）
+			// 不是空响应，绝不能按 429 暂停账号。正文/思考的区分由核心按入口协议渲染。
 			contentDeltas++
 		case *pb.StreamEvent_ToolCallDelta:
 			toolDeltas++
@@ -1227,11 +1226,10 @@ func (p *plugin) chatAnthropic(req *pb.ChatRequest, stream pb.ClawPlugin_ChatSer
 		}})
 	}
 	parser := anthropicup.NewParser(func(ev *pb.StreamEvent) {
-		switch e := ev.Event.(type) {
+		switch ev.Event.(type) {
 		case *pb.StreamEvent_ContentDelta:
-			if e.ContentDelta.GetReasoning() {
-				break // 思考增量：照常下发，但不计入正文（空响应判定只看正文 / 工具调用）
-			}
+			// 思考增量同样算「上游有响应」：只有思考没有正文（例如 max_tokens 太小、预算被思考吃光）
+			// 不是空响应，绝不能按 429 暂停账号。正文/思考的区分由核心按入口协议渲染。
 			contentDeltas++
 		case *pb.StreamEvent_ToolCallDelta:
 			toolDeltas++

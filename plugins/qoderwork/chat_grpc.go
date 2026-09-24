@@ -232,6 +232,8 @@ func (p *plugin) chatViaGRPC(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServe
 		if chunk.Reasoning != "" {
 			// 思考增量：契约自 v1.3.2 起带独立标记（ContentDelta.reasoning=true），
 			// 由核心按入口协议渲染（reasoning_content / thinking 块 / reasoning item），不再混进正文。
+			// 但计数照旧：只有思考没有正文时也属于「上游有响应」，不能当成空响应暂停账号。
+			contentDeltas++
 			ensureStart()
 			if err := stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_ContentDelta{
 				ContentDelta: &pb.ContentDelta{Text: chunk.Reasoning, Reasoning: true},

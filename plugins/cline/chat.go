@@ -83,9 +83,10 @@ func (p *plugin) ListModels(ctx context.Context, blob *pb.CredentialBlob) (*pb.M
 }
 
 // catalogScope 模型目录范围（插件设置 catalog_scope）：
-//   free（默认）= 只给免费渠道，和 Cline 客户端默认只拉 free 的行为一致
-//   pass        = 免费 + ClinePass 订阅款
-//   all         = 再加官方推荐与云通道（客户端已无云通道 provider）
+//
+//	free（默认）= 只给免费渠道，和 Cline 客户端默认只拉 free 的行为一致
+//	pass        = 免费 + ClinePass 订阅款
+//	all         = 再加官方推荐与云通道（客户端已无云通道 provider）
 func (p *plugin) catalogScope() string {
 	return normalizeCatalogScope(p.settingStr("catalog_scope", "free"))
 }
@@ -280,11 +281,10 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 		}})
 	}
 	emit := func(ev *pb.StreamEvent) {
-		switch e := ev.Event.(type) {
+		switch ev.Event.(type) {
 		case *pb.StreamEvent_ContentDelta:
-			if e.ContentDelta.GetReasoning() {
-				break // 思考增量：照常下发，但不计入正文（空响应判定只看正文 / 工具调用）
-			}
+			// 思考增量同样算「上游有响应」：只有思考没有正文（例如 max_tokens 太小、预算被思考吃光）
+			// 不是空响应，绝不能按 429 暂停账号。正文/思考的区分由核心按入口协议渲染。
 			contentDeltas++
 		case *pb.StreamEvent_ToolCallDelta:
 			toolDeltas++
