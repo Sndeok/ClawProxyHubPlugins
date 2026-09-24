@@ -236,8 +236,51 @@ func defaultEffort(m dynamicModel) string {
 
 const defaultUserType = "personal_professional_trial"
 
-// Chat 把 CPH 信封转成 QoderWork agent 请求：构造 body → QoderEncoding → COSY 签名 → 嵌套 SSE → 标准 chunk。
+// Chat 入口：按 chat_transport 选通道。
+//
+//   - grpc（默认）：千问办公 1.2.x 客户端的主通道
+//     （POST /model.chat.ChatService/ChatCompletionStream，HTTP/2 + protobuf 帧）；
+//   - sse：老的 /algo/.../sse/agent_chat_generation 通道，千问办公账号上是
+//     503 Model catalog unavailable（带不带 Encode=1 都一样，已实测），
+//     保留给 Qoder 那套部署用；
+//   - auto：先 gRPC，未向核心发出任何事件就失败时再回退 SSE。
 func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) error {
+	switch p.chatTransport() {
+	case "sse":
+		return p.chatViaSSE(req, stream)
+	case "auto":
+		sent, fail := p.chatViaGRPC(req, stream)
+		if fail != nil && !sent {
+			if p.host != nil {
+				p.host.Log("warn", "gRPC 通道失败，回退 SSE："+failText(fail))
+			}
+			return p.chatViaSSE(req, stream)
+		}
+		if fail != nil {
+			return stream.Send(fail)
+		}
+		return nil
+	default: // grpc
+		if _, fail := p.chatViaGRPC(req, stream); fail != nil {
+			return stream.Send(fail)
+		}
+		return nil
+	}
+}
+
+// failText 取失败事件的可读消息（日志用，nil 安全）。
+func failText(ev *pb.StreamEvent) string {
+	if ev == nil {
+		return ""
+	}
+	if f := ev.GetTaskFailed(); f != nil {
+		return f.GetError().GetMessage()
+	}
+	return ""
+}
+
+// chatViaSSE 老 SSE 通道：构造 body → QoderEncoding → COSY 签名 → 嵌套 SSE → 标准 chunk。
+func (p *plugin) chatViaSSE(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) error {
 	ctx := stream.Context()
 	cred, err := credFrom(req.GetCredential())
 	if err != nil {

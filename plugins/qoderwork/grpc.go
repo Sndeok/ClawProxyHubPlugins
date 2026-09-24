@@ -132,6 +132,15 @@ type grpcChunk struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	TotalTokens      int64
+	ToolCalls        []grpcToolCall
+}
+
+// grpcToolCall 上游 Struct 形状的工具调用：{id,type,function:{name,arguments}}。
+type grpcToolCall struct {
+	ID        string
+	Type      string
+	Name      string
+	Arguments string
 }
 
 // decodeChatChunk 解析 model.chat.ChatCompletionChunk 的一个分片。
@@ -192,6 +201,7 @@ func decodeChatChunk(b []byte) (grpcChunk, bool) {
 	}
 	if delta != nil {
 		c.Role, c.Content, c.Reasoning, c.Finish = decodeStreamChoice(delta)
+		c.ToolCalls = decodeToolCalls(delta)
 	}
 	return c, sawField
 }
@@ -436,8 +446,8 @@ func (p *plugin) rawPathProbe(ctx context.Context, cred *accountCred, sess *qode
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	r := fmt.Sprintf("HTTP %d proto=%s ct=%s len=%d", resp.StatusCode, resp.Proto, resp.Header.Get("content-type"), len(raw))
-	if gt := resp.Trailer.Get("grpc-status"); gt != "" {
-		r += " grpc-status=" + gt + " grpc-message=" + resp.Trailer.Get("grpc-message")
+	if gt := firstNonEmpty(resp.Trailer.Get("grpc-status"), resp.Header.Get("grpc-status")); gt != "" {
+		r += " grpc-status=" + gt + " grpc-message=" + firstNonEmpty(resp.Trailer.Get("grpc-message"), resp.Header.Get("grpc-message"))
 	}
 	if len(raw) > 0 {
 		r += " body=" + clip(strings.TrimSpace(string(raw)), 120)
@@ -469,10 +479,10 @@ func (p *plugin) grpcChatOnce(ctx context.Context, cred *accountCred, sess *qode
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	status := fmt.Sprintf("HTTP %d proto=%s len=%d", resp.StatusCode, resp.Proto, len(raw))
-	if gt := resp.Trailer.Get("grpc-status"); gt != "" {
+	if gt := firstNonEmpty(resp.Trailer.Get("grpc-status"), resp.Header.Get("grpc-status")); gt != "" {
 		status += " grpc-status=" + gt
 	}
-	if gm := resp.Trailer.Get("grpc-message"); gm != "" {
+	if gm := firstNonEmpty(resp.Trailer.Get("grpc-message"), resp.Header.Get("grpc-message")); gm != "" {
 		status += " grpc-message=" + gm
 	}
 	if len(raw) >= 5 {
