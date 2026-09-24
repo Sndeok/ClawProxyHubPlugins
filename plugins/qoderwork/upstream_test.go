@@ -25,8 +25,8 @@ func TestBuildAgentBody(t *testing.T) {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("请求体不是合法 JSON: %v", err)
 	}
-	// 必填骨架（逐字段对齐 qwenwork2api-makers 的可用配方；无 business 段）
-	for _, k := range []string{"request_id", "chat_record_id", "request_set_id", "session_id", "chat_task", "agent_id", "session_type", "model_config", "chat_context", "system", "messages", "tools", "parameters"} {
+	// 必填骨架（business 是 2026-09-24 定位到的 503 根因，必须存在）
+	for _, k := range []string{"request_id", "chat_record_id", "request_set_id", "session_id", "chat_task", "agent_id", "session_type", "model_config", "chat_context", "system", "messages", "tools", "parameters", "business"} {
 		if _, ok := body[k]; !ok {
 			t.Errorf("请求体缺少 %s", k)
 		}
@@ -42,6 +42,23 @@ func TestBuildAgentBody(t *testing.T) {
 	// 对齐客户端：千问办公用 qoder_work，空值回落默认（插件设置可覆盖）
 	if body["session_type"] != defaultSessionType {
 		t.Errorf("session_type = %v, want %v", body["session_type"], defaultSessionType)
+	}
+	// business 段：缺它上游必回 503 Model catalog unavailable（实测对照：只删该字段即复现 503）
+	biz, ok := body["business"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("business 段缺失或类型错误: %v", body["business"])
+	}
+	if biz["product"] != defaultProduct {
+		t.Errorf("business.product = %v, want %v", biz["product"], defaultProduct)
+	}
+	if biz["type"] != defaultBusinessType {
+		t.Errorf("business.type = %v, want %v", biz["type"], defaultBusinessType)
+	}
+	if biz["id"] != body["request_set_id"] {
+		t.Errorf("business.id 必须等于 request_set_id: %v vs %v", biz["id"], body["request_set_id"])
+	}
+	if _, ok := biz["begin_at"]; !ok {
+		t.Errorf("business.begin_at 缺失")
 	}
 	if mc, ok := body["model_config"].(map[string]interface{}); !ok || mc["key"] != "qmodel_preview" {
 		t.Errorf("model_config.key 未按模型写入: %v", body["model_config"])

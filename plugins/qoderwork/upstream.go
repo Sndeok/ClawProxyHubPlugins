@@ -5,8 +5,8 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"crypto/sha512"
-	"encoding/base64"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,6 +52,9 @@ const (
 	defaultSessionType    = "qoder_work" // session_type
 	defaultAliyunUserType = ""           // 客户端发空串
 	defaultTaskID         = "common"     // task_id
+	// business.version：官方 qoderclicn 1.1.59 原样上报自身版本。缺 business 段会 503
+	// Model catalog unavailable（见 chat.go buildAgentBody 的对照实验）。
+	defaultBusinessVersion = "1.1.59"
 )
 
 // 千问办公（qwenworkcn）网关。官方客户端把三件事都放在同一台主机上：

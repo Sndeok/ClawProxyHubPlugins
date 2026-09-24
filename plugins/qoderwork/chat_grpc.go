@@ -30,9 +30,11 @@ import (
 	"github.com/Sndeok/ClawProxyHubPlugins/internal/qodersign"
 )
 
-// chatTransport 取对话通道：grpc（默认，千问办公主通道）/ sse（老通道）/ auto（先 gRPC 失败回退 SSE）。
+// chatTransport 取对话通道：sse（默认；抓包确认千问办公官方客户端走的就是这条）
+// / grpc（gateway.qwenwork.cn 未实现该 service，只有指向 Qoder api2-v2 时才可用）
+// / auto（先 gRPC，失败回退 SSE）。
 func (p *plugin) chatTransport() string {
-	switch strings.ToLower(strings.TrimSpace(p.settingStr("chat_transport", "grpc"))) {
+	switch strings.ToLower(strings.TrimSpace(p.settingStr("chat_transport", "sse"))) {
 	case "sse":
 		return "sse"
 	case "auto":

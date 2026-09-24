@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -238,14 +239,13 @@ const defaultUserType = "personal_professional_trial"
 
 // Chat 入口：按 chat_transport 选通道。
 //
-//   - grpc（默认）：千问办公 1.2.x 客户端的主通道
-//     （POST /model.chat.ChatService/ChatCompletionStream，HTTP/2 + protobuf 帧）；
-//   - sse：/algo/.../sse/agent_chat_generation 通道。签名与鉴权实测均正确
-//     （改 body 会得到 400 decode Encode=1、改 authorization 会得到 403
-//     Signature invalid，说明路由与签名都过关），目前卡在服务端的
-//     503 Model catalog unavailable：目录接口 /api/v2/model/list?Encode=1 对同一
-//     凭据返回完整 qwork 目录，但对话接口拿不到「模型目录」句柄。详见
-//     .team/FINDINGS-chat-channel.md；
+//   - sse（默认；千问办公官方客户端的真实通道）：/algo/.../sse/agent_chat_generation。
+//     2026-09-24 用官方 qoderclicn 1.1.59 抓包确认走的就是这条（HTTP/1.1 + 嵌套 SSE）。
+//     历史 503 Model catalog unavailable 的根因是请求体缺 business 段，已修，见 buildAgentBody；
+//   - grpc：POST /model.chat.ChatService/ChatCompletionStream（HTTP/2 + protobuf 帧）。
+//     注意 gateway.qwenwork.cn 上没有实现该 service，打过去只会拿到 grpc-status=12
+//     UNIMPLEMENTED（实现它的是 Qoder 的 api2-v2.qoder.sh，需 Qoder 体系的 Bearer 令牌），
+//     因此不再作为默认通道；
 //   - auto：先 gRPC，未向核心发出任何事件就失败时再回退 SSE。
 func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) error {
 	switch p.chatTransport() {
@@ -442,12 +442,20 @@ func (p *plugin) chatViaSSE(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer
 // 不注入可让 baseline prompt 从 ~10K token 降到 ~60）。
 // buildAgentBody 组装 agent_chat_generation 的请求体。
 //
-// 形状逐字段对齐 qwenwork2api-makers（已验证可用的千问办公反代）：
 // 上游对 body 做的是强校验，类型不对就直接 400 Invalid agent chat JSON body。踩过的坑：
 //
 //	chat_context.text / extra.originalContent 必须是**字符串**（不是 {type,text} 对象）
 //	request_set_id / chat_record_id 必须等于 request_id（各随机一次会被判非法）
 //	system 与 parameters 是必备字段；tools / messages 可空
+//	business 段必须存在（缺它必然 503 Model catalog unavailable）
+//
+// 2026-09-24 定位「503 Model catalog unavailable」根因：body 必须带 business 段。
+// 用官方客户端真实抓包 body 做对照（其它字段全同、只删 business）→ 立刻 503；
+// 只把 business 补回 {product:"qoder_work"} → 200 正常出词。business 是上游算法服务
+// 解析「模型目录」的上下文，缺失时它拿不到目录句柄，便回 503。官方 qoderclicn 1.1.59 取值：
+// {product:"qoder_work",version:"1.1.59",type:"agent",id:<request_set_id>,
+//
+//	name:<prompt 前 10 字>,begin_at:<毫秒时间戳>,stage:"start"}。
 func (p *plugin) buildAgentBody(chatBody map[string]interface{}, modelKey string, cred *accountCred) []byte {
 	prompt := lastUserPrompt(chatBody)
 	system, messages := splitSystemMessages(chatBody["messages"])
@@ -520,6 +528,17 @@ func (p *plugin) buildAgentBody(chatBody map[string]interface{}, modelKey string
 		"messages":   stripCacheControl(messages),
 		"tools":      tools,
 		"parameters": parameters,
+		// business：上游定位「模型目录」的上下文。缺它必然 503 Model catalog unavailable
+		// （对照实验见函数注释）。形状对齐官方客户端，各字段可用插件设置覆盖。
+		"business": map[string]interface{}{
+			"product":  p.settingStr("business_product", defaultProduct),
+			"version":  p.settingStr("business_version", defaultBusinessVersion),
+			"type":     p.settingStr("business_type", defaultBusinessType),
+			"id":       requestID,
+			"name":     truncateRunes(prompt, 10),
+			"begin_at": time.Now().UnixMilli(),
+			"stage":    p.settingStr("business_stage", "start"),
+		},
 	}
 	b, _ := json.Marshal(body)
 	return b
