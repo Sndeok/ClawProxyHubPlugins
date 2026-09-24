@@ -101,6 +101,10 @@ type HeaderConfig struct {
 	ClientType   string            // cosy-clienttype（客户端 ClientMetadata.client_type；空=5）
 	ClientIP     string            // cosy-clientip，空则不发送
 	DataPolicy   string            // cosy-data-policy（Qoder: agree / QoderWork: AGREE）
+	MachineOS    string            // cosy-machineos（千问办公要 x86_64_win32；空则不发送）
+	UserAgent    string            // 覆盖出站 UA（千问办公官方是 qwenwork/<ver>；空=Go-http-client/2.0）
+	OmitMachineType bool           // true 时不发 cosy-machinetype（qwenwork2api 的可用配方不带它）
+	OmitClientIP    bool           // true 时不发 cosy-clientip
 	Extra        map[string]string // 其它固定头
 }
 
@@ -136,16 +140,21 @@ func (s *Session) ApplyHeaders(req *http.Request, cfg HeaderConfig, body, uid, m
 	h.Set("cosy-key", s.CosyKey)
 	h.Set("cosy-user", uid)
 	h.Set("cosy-date", date)
-	h.Set("cosy-machinetype", s.MachineType)
+	if !cfg.OmitMachineType {
+		h.Set("cosy-machinetype", s.MachineType)
+	}
 	h.Set("cosy-machineid", s.MachineID)
 	h.Set("cosy-machinetoken", s.MachineToken)
+	if cfg.MachineOS != "" {
+		h.Set("cosy-machineos", cfg.MachineOS)
+	}
 	h.Set("cosy-clienttype", orDefault(cfg.ClientType, "5"))
 	h.Set("cosy-version", orDefault(cfg.CosyVersion, "1.0.10"))
 	h.Set("login-version", "v2")
 	h.Set("accept", "text/event-stream")
 	h.Set("accept-encoding", "identity")
 	h.Set("cache-control", "no-cache")
-	h.Set("user-agent", "Go-http-client/2.0")
+	h.Set("user-agent", orDefault(cfg.UserAgent, "Go-http-client/2.0"))
 	if cfg.DataPolicy != "" {
 		h.Set("cosy-data-policy", cfg.DataPolicy)
 	}
@@ -159,7 +168,9 @@ func (s *Session) ApplyHeaders(req *http.Request, cfg HeaderConfig, body, uid, m
 		h.Set("cosy-business-type", cfg.BusinessType)
 	}
 	// 参考实现（qoderwork2api）固定下发 cosy-clientip，缺失时上游可能判为非法客户端
-	h.Set("cosy-clientip", orDefault(cfg.ClientIP, "169.254.198.161"))
+	if !cfg.OmitClientIP {
+		h.Set("cosy-clientip", orDefault(cfg.ClientIP, "169.254.198.161"))
+	}
 	if modelKey != "" { // Qoder 系用 x-model-key 指定上游模型
 		h.Set("x-model-key", modelKey)
 		h.Set("x-model-source", "system")

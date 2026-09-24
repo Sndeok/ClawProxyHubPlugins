@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -340,6 +341,83 @@ func (p *plugin) grpcChatProbe(ctx context.Context, cred *accountCred, model str
 	out = append(out, "POST /model.chat.ChatService/ChatCompletion（unary） → "+p.rawPathProbe(ctx, cred, sess, "/model.chat.ChatService/ChatCompletion", string(framed)))
 
 	return strings.Join(out, " ｜ ")
+}
+
+// makersChatBody 逐字节照抄 qwenwork2api-makers 的 buildBody（单条 user 消息），
+// 用来把「我们的 CPHN→body 转换层」从怀疑名单里摘出去。
+func makersChatBody(modelKey, text string) string {
+	requestID := randomUUID()
+	b := map[string]interface{}{
+		"request_id":     requestID,
+		"request_set_id": requestID,
+		"chat_record_id": requestID,
+		"session_id":     randomUUID(),
+		"stream":         true,
+		"chat_task":      "FREE_INPUT",
+		"chat_context": map[string]interface{}{
+			"text":       text,
+			"features":   []interface{}{},
+			"chatPrompt": "",
+			"imageUrls":  nil,
+			"extra": map[string]interface{}{
+				"context":         []interface{}{},
+				"modelConfig":     map[string]interface{}{"key": modelKey, "is_reasoning": false, "is_vl": true},
+				"originalContent": text,
+			},
+		},
+		"is_reply":         true,
+		"is_retry":         false,
+		"source":           1,
+		"version":          "3",
+		"agent_id":         "agent_common",
+		"task_id":          "common",
+		"session_type":     "qoder_work",
+		"aliyun_user_type": "",
+		"model_config": map[string]interface{}{
+			"key": modelKey, "display_name": modelKey, "model": "", "format": "openai",
+			"is_vl": true, "is_reasoning": false, "api_key": "", "url": "",
+			"source": "system", "max_input_tokens": 180000,
+		},
+		"system":     "",
+		"messages":   []interface{}{map[string]interface{}{"role": "user", "content": text}},
+		"tools":      []interface{}{},
+		"parameters": map[string]interface{}{"max_tokens": 32000},
+	}
+	bts, _ := json.Marshal(b)
+	return string(bts)
+}
+
+// chatProbe 用 makers 的 body + 当前插件设置的头，真打一次 SSE 对话通道。
+func (p *plugin) chatProbe(ctx context.Context, cred *accountCred, model string) string {
+	if err := p.fillFingerprint(cred); err != nil {
+		return "探针失败(指纹): " + err.Error()
+	}
+	sess, err := qodersign.NewSession(qodersign.Identity{
+		Name: cred.Nickname, Aid: cred.UID, Uid: cred.UID,
+		UserType: defaultUserType, SecurityOauthToken: cred.DT, RefreshToken: cred.DRT,
+	}, cred.MachineID, cred.MachineToken, cred.MachineType)
+	if err != nil {
+		return "探针失败(COSY): " + err.Error()
+	}
+	bodyStr := makersChatBody(model, "只回答两个字符：OK")
+	rawURL := p.gatewayBaseURL() + p.settingStr("chat_path", chatPath)
+	req, err := http.NewRequestWithContext(ctx, "POST", rawURL, strings.NewReader(bodyStr))
+	if err != nil {
+		return "建请求失败: " + err.Error()
+	}
+	if err := sess.ApplyHeaders(req, p.headerCfg(), bodyStr, cred.UID, model); err != nil {
+		return "签名失败: " + err.Error()
+	}
+	resp, err := p.httpClient(cred).Do(req)
+	if err != nil {
+		return "请求失败: " + err.Error()
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(resp.Body, buf)
+	head := string(buf[:n])
+	r := fmt.Sprintf("HTTP %d ct=%s first=%s", resp.StatusCode, resp.Header.Get("content-type"), clip(strings.ReplaceAll(head, "\n", "\\n"), 400))
+	return r
 }
 
 // rawPathProbe 打一条候选路径，返回「HTTP 状态 / content-type / 长度 / 前 120 字节」。

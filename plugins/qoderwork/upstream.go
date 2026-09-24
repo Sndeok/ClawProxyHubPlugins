@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/base64"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -95,13 +99,17 @@ func (p *plugin) adapterBaseURL() string { return p.apiBase("adapter_base", adap
 // 无论选哪个模型都回默认的 Qwen3.5。
 func (p *plugin) headerCfg() qodersign.HeaderConfig {
 	return qodersign.HeaderConfig{
-		CosyVersion:  p.settingStr("cosy_version", cosyVersion),
-		ClientIP:     p.settingStr("cosy_client_ip", cosyClientIP),
-		DataPolicy:   "AGREE",
-		ClientType:   p.settingStr("cosy_client_type", defaultClientType),
-		Product:      p.settingStr("cosy_business_product", defaultProduct),
-		BusinessType: p.settingStr("cosy_business_type", defaultBusinessType),
-		Scene:        p.settingStr("cosy_scene", defaultScene),
+		CosyVersion:     p.settingStr("cosy_version", cosyVersion),
+		ClientIP:        p.settingStr("cosy_client_ip", cosyClientIP),
+		DataPolicy:      "AGREE",
+		ClientType:      p.settingStr("cosy_client_type", defaultClientType),
+		Product:         p.settingStr("cosy_business_product", defaultProduct),
+		BusinessType:    p.settingStr("cosy_business_type", defaultBusinessType),
+		Scene:           p.settingStr("cosy_scene", defaultScene),
+		MachineOS:       p.settingStr("cosy_machineos", ""),
+		UserAgent:       p.settingStr("outbound_user_agent", ""),
+		OmitMachineType: p.settingBool("omit_cosy_machinetype", false),
+		OmitClientIP:    p.settingBool("omit_cosy_clientip", false),
 	}
 }
 
@@ -289,6 +297,18 @@ func (p *plugin) qwenWorkClientHeaders() map[string]string {
 		"X-QwenWork-Platform":        p.settingStr("qwenwork_platform", defaultQwenWorkPlatform),
 		"X-QwenWork-Arch":            p.settingStr("qwenwork_arch", defaultQwenWorkArch),
 		"X-QwenWork-Channel":         p.settingStr("qwenwork_channel", defaultQwenWorkChannel),
+	}
+}
+
+// applyQwenWorkHeaders 把千问办公客户端特征头（X-QwenWork-* + X-Request-Id）落到请求上。
+// 目录 / 令牌 / 对话三条链路都要带：chat 缺这组头时上游会回
+// 503 {"code":"503","message":"Model catalog unavailable"}。
+func (p *plugin) applyQwenWorkHeaders(req *http.Request) {
+	for k, v := range p.qwenWorkClientHeaders() {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "x-qwenwork-") || lk == "x-request-id" {
+			req.Header.Set(k, v)
+		}
 	}
 }
 
@@ -631,20 +651,68 @@ func (p *plugin) refreshDeviceToken(ctx context.Context, client *http.Client, c 
 
 // ---------- 设备指纹 ----------
 
-// fillFingerprint 派生并写入稳定设备指纹（已有则保留）。
+// fillFingerprint 派生并写入稳定设备指纹（已有则保留；machine_regen=1 时强制重生）。
+//
+// 千问办公对机器码形状敏感：官方客户端 getMachineId() 用正则强制 UUID（8-4-4-4-12），
+// 而 qodersign 派生出来的是 32 位 md5。qwenwork2api-makers 用的是随机 uuid，
+// 这里折中：仍按账号确定性派生（多实例/重启保持一致），但输出 UUID 形状。
 func (p *plugin) fillFingerprint(c *accountCred) error {
-	if c.MachineID != "" && c.MachineToken != "" && c.MachineType != "" {
+	regen := p.settingBool("machine_regen", false)
+	if !regen && c.MachineID != "" && c.MachineToken != "" && c.MachineType != "" {
 		return nil
 	}
 	seed := qodersign.SeedFor(c.UID, c.DT)
+	if regen {
+		seed += "|regen:" + randomID(8)
+	}
+	if p.settingBool("machine_uuid_shape", true) {
+		c.MachineID = uuidFromSeed("machineid:" + seed)
+		c.MachineType = randomTypeFromSeed(seed)
+		c.MachineToken = tokenFromSeed(seed)
+		return nil
+	}
 	fp := qodersign.DeriveFingerprint(seed, p.machineSalt())
 	c.MachineID, c.MachineType, c.MachineToken = fp.MachineID, fp.MachineType, fp.MachineToken
 	return nil
 }
 
+// uuidFromSeed 由种子确定性生成 UUID v4 形状的机器码（与官方客户端同形状）。
+func uuidFromSeed(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// tokenFromSeed 43 字符 base64url 机器令牌（与参考实现的长度一致）。
+func tokenFromSeed(seed string) string {
+	sum := sha512.Sum512([]byte("machinetoken:" + seed))
+	return base64.RawURLEncoding.EncodeToString(sum[:])[:43]
+}
+
+// randomTypeFromSeed 18 字符机器类型。
+func randomTypeFromSeed(seed string) string {
+	sum := md5.Sum([]byte("machinetype:" + seed))
+	return fmt.Sprintf("%x", sum)[:18]
+}
+
 // machineSalt 插件设置里的本机盐（空 = 与参考实现同构）。
 func (p *plugin) machineSalt() string {
 	return strings.TrimSpace(str(p.settings()["machine_salt"]))
+}
+
+// settingBool 读插件设置里的布尔（1/true/on 视为真；缺省用 def）。
+func (p *plugin) settingBool(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(str(p.settings()[key])))
+	switch v {
+	case "":
+		return def
+	case "1", "true", "on", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 // settingStr 读插件设置里的字符串（空值回落默认）。

@@ -25,11 +25,16 @@ func TestBuildAgentBody(t *testing.T) {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("请求体不是合法 JSON: %v", err)
 	}
-	// 必填骨架
-	for _, k := range []string{"request_id", "chat_record_id", "request_set_id", "session_id", "chat_task", "agent_id", "session_type", "model_config", "chat_context", "business"} {
+	// 必填骨架（逐字段对齐 qwenwork2api-makers 的可用配方；无 business 段）
+	for _, k := range []string{"request_id", "chat_record_id", "request_set_id", "session_id", "chat_task", "agent_id", "session_type", "model_config", "chat_context", "system", "messages", "tools", "parameters"} {
 		if _, ok := body[k]; !ok {
 			t.Errorf("请求体缺少 %s", k)
 		}
+	}
+	// 上游要求三个 id 完全一致，各随机一次会被判非法
+	if body["request_id"] != body["chat_record_id"] || body["request_id"] != body["request_set_id"] {
+		t.Errorf("request_id / chat_record_id / request_set_id 必须相同: %v %v %v",
+			body["request_id"], body["chat_record_id"], body["request_set_id"])
 	}
 	if body["stream"] != true {
 		t.Errorf("stream 必须为 true（上游只支持流式）")
@@ -41,34 +46,39 @@ func TestBuildAgentBody(t *testing.T) {
 	if mc, ok := body["model_config"].(map[string]interface{}); !ok || mc["key"] != "qmodel_preview" {
 		t.Errorf("model_config.key 未按模型写入: %v", body["model_config"])
 	}
+	// system 消息被抽成独立字段，messages 里只剩非 system
+	if body["system"] != "你是助手" {
+		t.Errorf("system 未抽到独立字段: %v", body["system"])
+	}
 	msgs, _ := body["messages"].([]interface{})
-	if len(msgs) != 2 {
-		t.Errorf("客户端消息未完整透传: %d", len(msgs))
+	if len(msgs) != 1 {
+		t.Errorf("messages 应只剩 1 条 user，实际 %d", len(msgs))
 	}
 	if _, ok := body["tools"]; !ok {
-		t.Errorf("客户端 tools 未透传")
+		t.Errorf("tools 字段缺失（客户端未传时也要给空数组）")
 	}
-	// chat_context.text 取最后一条 user 文本
+	// chat_context.text / extra.originalContent 必须是字符串（不是 {type,text} 对象）
 	ctx, _ := body["chat_context"].(map[string]interface{})
-	txt, _ := ctx["text"].(map[string]interface{})
-	if txt["text"] != "帮我看看这段代码" {
-		t.Errorf("chat_context.text 取错: %v", txt["text"])
+	if got, _ := ctx["text"].(string); got != "帮我看看这段代码" {
+		t.Errorf("chat_context.text 取错: %v", ctx["text"])
 	}
-	biz, _ := body["business"].(map[string]interface{})
-	if biz["name"] != "帮我看看这段代码" {
-		t.Errorf("business.name 取错: %v", biz["name"])
+	extra, _ := ctx["extra"].(map[string]interface{})
+	if got, _ := extra["originalContent"].(string); got != "帮我看看这段代码" {
+		t.Errorf("chat_context.extra.originalContent 取错: %v", extra["originalContent"])
 	}
 }
 
-// TestBuildAgentBodyNoTools 客户端没给 tools 时不应注入（否则会带上模板的 74 个工具定义）。
+// TestBuildAgentBodyNoTools 客户端没给 tools 时下发空数组，
+// 但不注入客户端模板里的 74 个工具定义（省 token 的关键行为）。
 func TestBuildAgentBodyNoTools(t *testing.T) {
 	raw := (&plugin{}).buildAgentBody(map[string]interface{}{
 		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
 	}, "m1", &accountCred{UID: "u1"})
 	var body map[string]interface{}
 	_ = json.Unmarshal(raw, &body)
-	if _, ok := body["tools"]; ok {
-		t.Error("客户端未传 tools 时不应出现 tools 字段")
+	tools, ok := body["tools"].([]interface{})
+	if !ok || len(tools) != 0 {
+		t.Errorf("客户端未传 tools 时应给空数组，实际 %v", body["tools"])
 	}
 }
 

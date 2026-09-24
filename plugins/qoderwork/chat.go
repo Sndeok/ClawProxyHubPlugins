@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -115,10 +114,24 @@ func (p *plugin) fetchModels(ctx context.Context, cred *accountCred) ([]dynamicM
 	if err != nil {
 		return nil, err
 	}
-	paths := []string{p.settingStr("models_path", modelsPath)}
-	if modelsPathOld != paths[0] {
-		paths = append(paths, modelsPathOld)
+	// 依次尝试：插件设置的自定义路径 → 真实路径 → 旧前缀。
+	// 自定义路径写错（例如误填 /algo 旧前缀）时仍能自动回退，不会把目录拉挂。
+	paths := make([]string, 0, 3)
+	addPath := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		for _, e := range paths {
+			if e == v {
+				return
+			}
+		}
+		paths = append(paths, v)
 	}
+	addPath(p.settingStr("models_path", ""))
+	addPath(modelsPath)
+	addPath(modelsPathOld)
 	var firstErr error
 	for _, path := range paths {
 		models, err := p.fetchModelsAt(ctx, cred, sess, path)
@@ -147,13 +160,9 @@ func (p *plugin) fetchModelsAt(ctx context.Context, cred *accountCred, sess *qod
 	if err := sess.ApplyHeaders(req, p.headerCfg(), "", cred.UID, ""); err != nil {
 		return nil, err
 	}
-	// 千问办公客户端对网关 REST 请求都会带这组 X-QwenWork-* 头；
-	// 只补这几个，不动 COSY 已设好的 Accept / User-Agent。
-	for k, v := range p.qwenWorkClientHeaders() {
-		if strings.HasPrefix(strings.ToLower(k), "x-qwenwork-") {
-			req.Header.Set(k, v)
-		}
-	}
+	// 千问办公客户端对网关 REST 请求都会带这组头；只补 X-QwenWork-*/X-Request-Id，
+	// 不动 COSY 已设好的 Accept / User-Agent。
+	p.applyQwenWorkHeaders(req)
 	resp, err := p.httpClient(cred).Do(req)
 	if err != nil {
 		return nil, err
@@ -261,7 +270,7 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	if err != nil {
 		return stream.Send(failed(500, err.Error()))
 	}
-	rawURL := p.gatewayBaseURL() + chatPath
+	rawURL := p.gatewayBaseURL() + p.settingStr("chat_path", chatPath)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", rawURL, strings.NewReader(encoded))
 	if err != nil {
 		return stream.Send(failed(500, err.Error()))
@@ -271,6 +280,9 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	}
 	// 流式必须 identity：gzip 会把 SSE 缓冲成一次性下发（打字机效果消失）
 	httpReq.Header.Set("Accept-Encoding", "identity")
+	// 千问办公客户端对网关的所有请求（含对话）都带 X-QwenWork-* + X-Request-Id。
+	// 实测缺失时上游会回 503 {"code":"503","message":"Model catalog unavailable"}。
+	p.applyQwenWorkHeaders(httpReq)
 	resp, err := p.httpClient(cred).Do(httpReq)
 	if err != nil {
 		return stream.Send(failed(502, "上游连接失败: "+err.Error()))
@@ -382,28 +394,68 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 // buildAgentBody 构造 QoderWork agent_chat_generation 请求体（最小可用骨架，
 // 只带客户端自己的 messages/tools —— 参考实现实测模板 system/tools 非必需，
 // 不注入可让 baseline prompt 从 ~10K token 降到 ~60）。
+// buildAgentBody 组装 agent_chat_generation 的请求体。
+//
+// 形状逐字段对齐 qwenwork2api-makers（已验证可用的千问办公反代）：
+// 上游对 body 做的是强校验，类型不对就直接 400 Invalid agent chat JSON body。踩过的坑：
+//
+//	chat_context.text / extra.originalContent 必须是**字符串**（不是 {type,text} 对象）
+//	request_set_id / chat_record_id 必须等于 request_id（各随机一次会被判非法）
+//	system 与 parameters 是必备字段；tools / messages 可空
 func (p *plugin) buildAgentBody(chatBody map[string]interface{}, modelKey string, cred *accountCred) []byte {
 	prompt := lastUserPrompt(chatBody)
-	now := time.Now()
-	uuid := randomUUID()
+	system, messages := splitSystemMessages(chatBody["messages"])
+	if prompt == "" {
+		prompt = "ping"
+	}
+
+	parameters := map[string]interface{}{}
+	for _, k := range []string{"temperature", "top_p", "max_tokens", "presence_penalty", "frequency_penalty"} {
+		if v, ok := chatBody[k]; ok && v != nil {
+			parameters[k] = v
+		}
+	}
+	if _, ok := parameters["max_tokens"]; !ok {
+		parameters["max_tokens"] = 32000
+	}
+
+	tools := []interface{}{}
+	if t, ok := chatBody["tools"]; ok && t != nil {
+		tools, _ = t.([]interface{})
+		if tools == nil {
+			tools = []interface{}{}
+		}
+	}
+
+	requestID := randomUUID()
 	body := map[string]interface{}{
-		"request_id":     uuid,
-		"chat_record_id": uuid,
-		"request_set_id": randomUUID(),
+		"request_id":     requestID,
+		"request_set_id": requestID,
+		"chat_record_id": requestID,
 		"session_id":     randomUUID(),
 		"stream":         true,
+		"chat_task":      "FREE_INPUT",
+		"chat_context": map[string]interface{}{
+			"text":       prompt,
+			"features":   []interface{}{},
+			"chatPrompt": "",
+			"imageUrls":  nil,
+			"extra": map[string]interface{}{
+				"context":         []interface{}{},
+				"modelConfig":     map[string]interface{}{"key": modelKey, "is_reasoning": false, "is_vl": true},
+				"originalContent": prompt,
+			},
+		},
+		"is_reply": true,
+		"is_retry": false,
+		"source":   1,
+		"version":  "3",
 		// 对齐千问办公客户端：session_type=qoder_work、aliyun_user_type 留空、
-		// source=1、version=3、task_id=common（这几项 + model_config 不全时，上游会忽略所选模型）。
+		// agent_id=agent_common、task_id=common（这几项 + model_config 不全时，上游会忽略所选模型）
 		"aliyun_user_type": p.settingStr("aliyun_user_type", defaultAliyunUserType),
 		"agent_id":         "agent_common",
 		"session_type":     p.settingStr("session_type", defaultSessionType),
 		"task_id":          p.settingStr("task_id", defaultTaskID),
-		"source":           1,
-		"version":          "3",
-		"chat_task":        "FREE_INPUT",
-		"is_reply":         true,
-		"is_retry":         false,
-		"image_urls":       nil,
 		// model_config 必须是客户端 SDK 那种完整形状：实测只给 {key,is_reasoning} 时上游静默回落
 		// 默认模型（所有模型都回同一个），补齐 source/format/is_vl/display_name 等后才真正按所选路由。
 		"model_config": map[string]interface{}{
@@ -412,39 +464,49 @@ func (p *plugin) buildAgentBody(chatBody map[string]interface{}, modelKey string
 			"model":            "",
 			"format":           p.settingStr("model_format", "openai"),
 			"is_vl":            true,
-			"is_reasoning":     true,
+			"is_reasoning":     false,
 			"api_key":          "",
 			"url":              "",
 			"source":           p.settingStr("model_source", "system"),
-			"max_input_tokens": 1000000,
+			"max_input_tokens": 180000,
 		},
-		"chat_context": map[string]interface{}{
-			"chatPrompt": "",
-			"text":       map[string]interface{}{"type": "text", "text": prompt},
-			"extra": map[string]interface{}{
-				"context":         []interface{}{},
-				"modelConfig":     map[string]interface{}{"key": modelKey, "is_reasoning": false},
-				"originalContent": map[string]interface{}{"type": "text", "text": prompt},
-			},
-			"features":  []interface{}{},
-			"imageUrls": nil,
-		},
-		"business": map[string]interface{}{
-			"id":       randomUUID(),
-			"begin_at": now.UnixMilli(),
-			"name":     truncateRunes(prompt, 30),
-		},
-	}
-	if msgs, ok := chatBody["messages"]; ok {
-		body["messages"] = stripCacheControl(msgs)
-	} else {
-		body["messages"] = []interface{}{}
-	}
-	if tools, ok := chatBody["tools"]; ok {
-		body["tools"] = tools // 客户端传了才带
+		"system":     system,
+		"messages":   stripCacheControl(messages),
+		"tools":      tools,
+		"parameters": parameters,
 	}
 	b, _ := json.Marshal(body)
 	return b
+}
+
+// splitSystemMessages 把 system 消息抽成一段文本（上游要单独字段），其余按原样透传。
+func splitSystemMessages(raw interface{}) (string, []interface{}) {
+	list, _ := raw.([]interface{})
+	if list == nil {
+		if ms, ok := raw.([]map[string]interface{}); ok {
+			list = make([]interface{}, 0, len(ms))
+			for _, m := range ms {
+				list = append(list, m)
+			}
+		}
+	}
+	sys := make([]string, 0, 2)
+	out := make([]interface{}, 0, len(list))
+	for _, item := range list {
+		m, _ := item.(map[string]interface{})
+		if m == nil {
+			out = append(out, item)
+			continue
+		}
+		if role, _ := m["role"].(string); role == "system" {
+			if txt := contentText(m["content"]); strings.TrimSpace(txt) != "" {
+				sys = append(sys, txt)
+			}
+			continue
+		}
+		out = append(out, m)
+	}
+	return strings.Join(sys, "\n\n"), out
 }
 
 func lastUserPrompt(chatBody map[string]interface{}) string {

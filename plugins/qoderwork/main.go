@@ -288,6 +288,10 @@ func (p *plugin) profileFor(ctx context.Context, cred *accountCred) *pb.AccountP
 	if probe := p.settingStr("grpc_probe", ""); probe != "" {
 		prof.Sections = append(prof.Sections, sectionNote("grpc_probe", "gRPC 通道探针", p.grpcChatProbe(ctx, cred, probe)))
 	}
+	// chat_probe=<模型 key>：用 makers 的 body 真打一次 SSE 对话通道，验证转换层之外的因素。
+	if probe := p.settingStr("chat_probe", ""); probe != "" {
+		prof.Sections = append(prof.Sections, sectionNote("chat_probe", "SSE 对话探针", p.chatProbe(ctx, cred, probe)))
+	}
 	return prof
 }
 
