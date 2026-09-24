@@ -230,11 +230,11 @@ func (p *plugin) chatViaGRPC(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServe
 			return fmt.Errorf("上游分片 code=%d", chunk.Code)
 		}
 		if chunk.Reasoning != "" {
-			// CPH 事件里没有独立的思考通道：思考增量同样按正文下发，避免用户看不到过程。
-			contentDeltas++
+			// 思考增量：契约自 v1.3.2 起带独立标记（ContentDelta.reasoning=true），
+			// 由核心按入口协议渲染（reasoning_content / thinking 块 / reasoning item），不再混进正文。
 			ensureStart()
 			if err := stream.Send(&pb.StreamEvent{Event: &pb.StreamEvent_ContentDelta{
-				ContentDelta: &pb.ContentDelta{Text: chunk.Reasoning},
+				ContentDelta: &pb.ContentDelta{Text: chunk.Reasoning, Reasoning: true},
 			}}); err != nil {
 				return err
 			}

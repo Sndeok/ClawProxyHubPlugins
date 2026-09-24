@@ -1264,6 +1264,9 @@ func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) erro
 	parser := openaiup.NewParser(func(ev *pb.StreamEvent) {
 		switch e := ev.Event.(type) {
 		case *pb.StreamEvent_ContentDelta:
+			if e.ContentDelta.GetReasoning() {
+				break // 思考增量：照常下发，但不计正文、不参与内容过滤
+			}
 			contentDeltas++
 			if replyBuf.Len() < 4096 {
 				replyBuf.WriteString(e.ContentDelta.Text)
