@@ -166,3 +166,35 @@ func TestChatQuotaMapsTo402(t *testing.T) {
 		t.Errorf("详情应含完整上游返回: %s", fail.TaskFailed.Detail)
 	}
 }
+
+// 只有思考没有正文（max_tokens 太小、预算被思考吃光）不是空响应：
+// 不能报 429（那会让核心暂停账号 10 分钟），思考按 Reasoning 标记下发、正常收尾。
+func TestChatReasoningOnlyIsNot429(t *testing.T) {
+	withUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Let me think\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" a bit more\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+	events := runChat(t, "auto", false)
+	var reasoning, finish int
+	for _, ev := range events {
+		switch e := ev.Event.(type) {
+		case *pb.StreamEvent_TaskFailed:
+			t.Fatalf("只有思考不应报失败：code=%d msg=%s", e.TaskFailed.Error.Code, e.TaskFailed.Error.Message)
+		case *pb.StreamEvent_ContentDelta:
+			if !e.ContentDelta.GetReasoning() {
+				t.Errorf("思考增量必须带 Reasoning 标记：%q", e.ContentDelta.Text)
+			}
+			reasoning++
+		case *pb.StreamEvent_MessageFinish:
+			finish++
+		}
+	}
+	if reasoning != 2 {
+		t.Errorf("思考增量数 = %d, want 2", reasoning)
+	}
+	if finish != 1 {
+		t.Errorf("应以正常 MessageFinish 收尾，实际 %d", finish)
+	}
+}
