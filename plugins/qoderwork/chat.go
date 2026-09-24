@@ -240,9 +240,12 @@ const defaultUserType = "personal_professional_trial"
 //
 //   - grpc（默认）：千问办公 1.2.x 客户端的主通道
 //     （POST /model.chat.ChatService/ChatCompletionStream，HTTP/2 + protobuf 帧）；
-//   - sse：老的 /algo/.../sse/agent_chat_generation 通道，千问办公账号上是
-//     503 Model catalog unavailable（带不带 Encode=1 都一样，已实测），
-//     保留给 Qoder 那套部署用；
+//   - sse：/algo/.../sse/agent_chat_generation 通道。签名与鉴权实测均正确
+//     （改 body 会得到 400 decode Encode=1、改 authorization 会得到 403
+//     Signature invalid，说明路由与签名都过关），目前卡在服务端的
+//     503 Model catalog unavailable：目录接口 /api/v2/model/list?Encode=1 对同一
+//     凭据返回完整 qwork 目录，但对话接口拿不到「模型目录」句柄。详见
+//     .team/FINDINGS-chat-channel.md；
 //   - auto：先 gRPC，未向核心发出任何事件就失败时再回退 SSE。
 func (p *plugin) Chat(req *pb.ChatRequest, stream pb.ClawPlugin_ChatServer) error {
 	switch p.chatTransport() {

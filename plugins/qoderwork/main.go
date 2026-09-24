@@ -292,6 +292,10 @@ func (p *plugin) profileFor(ctx context.Context, cred *accountCred) *pb.AccountP
 	if probe := p.settingStr("chat_probe", ""); probe != "" {
 		prof.Sections = append(prof.Sections, sectionNote("chat_probe", "SSE 对话探针", p.chatProbe(ctx, cred, probe)))
 	}
+	// matrix_probe=1：按 probe_json 的用例矩阵逐条打上游，输出完整原始响应（定位 503 根因）。
+	if p.settingStr("matrix_probe", "") == "1" {
+		prof.Sections = append(prof.Sections, sectionNote("matrix_probe", "矩阵探针", p.probeMatrix(ctx, cred)))
+	}
 	return prof
 }
 
